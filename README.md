@@ -18,9 +18,10 @@ test mode simulation, and resilient reconciliation/order-tracking.
 ## Usage
 
 1. Clone the repository.
-2. Install dependencies from `requirements.txt`.
-3. Configure environment variables (Telegram token, exchange keys, etc.).
-4. Start with `python start_bot.py`.
+2. Install runtime dependencies with `pip install -r requirements.txt`.
+3. For linting and tests, install dev dependencies with `pip install -r requirements-dev.txt`.
+4. Configure environment variables (Telegram token, exchange keys, etc.).
+5. Start with `python start_bot.py`.
 
 ## Telegram Commands
 

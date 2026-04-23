@@ -40,23 +40,16 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          if [ -f android-grid-bot/requirements-dev.txt ]; then
-            pip install -r android-grid-bot/requirements-dev.txt
-          elif [ -f android-grid-bot/requirements.txt ]; then
-            pip install -r android-grid-bot/requirements.txt
-          else
-            pip install pytest ruff
-          fi
+          pip install -r requirements-dev.txt
 
       - name: Lint with ruff
         run: |
-          ruff check android-grid-bot
+          ruff check .
 
       - name: Byte-compile critical modules
         run: |
-          python -m py_compile android-grid-bot/andriod_grid_bot_v1.py android-grid-bot/db.py android-grid-bot/tests/test_reconcile.py android-grid-bot/tools/sim_reconcile_demo.py
+          python -m py_compile andriod_grid_bot_v1.py db.py tests/test_reconcile.py tools/sim_reconcile_demo.py
 
       - name: Run tests
         run: |
-          cd android-grid-bot
           python -m pytest -q

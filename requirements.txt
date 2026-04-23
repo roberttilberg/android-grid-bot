@@ -1,5 +1,1 @@
-ccxt
-python-dotenv
-requests
-pandas
-numpy
+.
