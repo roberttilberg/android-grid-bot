@@ -1,0 +1,6 @@
+ruff==0.0.285
+pytest
+pre-commit
+ruff==0.0.285
+pytest
+pre-commit
