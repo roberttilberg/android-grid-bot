@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "android_grid_bot",
+  "project_id": "bc7317b6-23f7-40c3-9b82-a26afeca8ad7"
+}
