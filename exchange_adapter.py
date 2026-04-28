@@ -80,6 +80,23 @@ class ExchangeAdapter:
 
     @retry()
     def fetch_ohlcv(self, symbol, timeframe="1h", limit=500):
+        # Phemex OHLCV can reject settle-suffixed symbols like XRP/USDT:USDT.
+        # Try normalized symbol first, then fallback to original.
+        if self.exchange_id == "phemex" and ":" in str(symbol):
+            normalized = str(symbol).split(":", 1)[0]
+            try:
+                return self.exchange.fetch_ohlcv(
+                    normalized,
+                    timeframe=timeframe,
+                    limit=limit,
+                )
+            except Exception as first_error:
+                log.warning(
+                    "Phemex OHLCV failed for normalized symbol %s; retrying original %s: %s",
+                    normalized,
+                    symbol,
+                    first_error,
+                )
         return self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
 
     @retry()
