@@ -833,7 +833,9 @@ def get_telegram_updates(offset=None):
 def calculate_volatility(exchange, symbol, lookback=14):
     """Calculate recent price volatility using ATR-like method"""
     try:
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe='1h', limit=lookback)
+        # Phemex OHLCV endpoint requires base symbol format (XRP/USDT not XRP/USDT:USDT)
+        fetch_symbol = symbol.replace(':USDT', '') if ':' in symbol else symbol
+        ohlcv = exchange.fetch_ohlcv(fetch_symbol, timeframe='1h', limit=lookback)
         if len(ohlcv) < 2:
             return 0.02  # Default 2%
 
@@ -875,7 +877,9 @@ def detect_trend(exchange, symbol, lookback=20):
     Returns: 'BULLISH', 'BEARISH', or 'SIDEWAYS'
     """
     try:
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe='4h', limit=lookback)
+        # Phemex OHLCV endpoint requires base symbol format (XRP/USDT not XRP/USDT:USDT)
+        fetch_symbol = symbol.replace(':USDT', '') if ':' in symbol else symbol
+        ohlcv = exchange.fetch_ohlcv(fetch_symbol, timeframe='4h', limit=lookback)
         if len(ohlcv) < lookback:
             return 'SIDEWAYS'
 
