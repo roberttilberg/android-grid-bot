@@ -1576,6 +1576,17 @@ def get_exchange():
             options={"defaultType": "swap"}
         )
         return adapter
+    except ccxt.AuthenticationError as e:
+        err = str(e)
+        if any(kw in err.lower() for kw in ("ip", "whitelist", "not allowed", "30002")):
+            raise SystemExit(
+                "ERROR: Phemex rejected this connection because your current IP address "
+                "is not on the API key whitelist.\n"
+                "Fix: Log in to Phemex → API Management → edit your API key → "
+                "either disable IP restriction or add your phone's IP address.\n"
+                f"Original error: {e}"
+            ) from e
+        raise SystemExit(f"ERROR: Phemex authentication failed: {e}") from e
     except Exception as e:
         log.error(f"Could not create ExchangeAdapter: {e}; falling back to ccxt direct client")
         return ccxt.phemex({

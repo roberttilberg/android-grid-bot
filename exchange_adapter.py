@@ -20,6 +20,11 @@ def retry(max_attempts=5, base_delay=0.5):
             while True:
                 try:
                     return f(*args, **kwargs)
+                except ccxt.AuthenticationError:
+                    # Authentication errors (e.g. IP not whitelisted) are permanent;
+                    # retrying will not help.
+                    log.error("Authentication error in %s — not retrying.", f.__name__)
+                    raise
                 except Exception as e:
                     attempt += 1
                     if attempt >= max_attempts:
