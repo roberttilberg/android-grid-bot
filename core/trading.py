@@ -2,10 +2,10 @@ import logging
 from datetime import datetime
 
 import core.config as config
-from core.config import *
 import db as orders_db
-from db import get_open_trades_from_db, complete_catchup_trade, log_catchup_trade
+from core.config import *
 from core.telegram_handler import send_telegram
+from db import complete_catchup_trade, get_open_trades_from_db, log_catchup_trade
 
 log = logging.getLogger('gridbot.trading')
 
@@ -475,19 +475,55 @@ class PaperTrader:
                          f"current ${current_price:.4f}")
                 self.sell(current_price, self.order_size, i)
 
+    def _has_trade_history(self):
+        """Check if the bot has previous trade history in the DB.
+
+        Returns True if there are existing trades, indicating this is a
+        restart (possible network disconnection) rather than a cold start.
+        """
+        try:
+            conn = orders_db.get_conn()
+            c = conn.cursor()
+            c.execute("SELECT COUNT(*) FROM trades")
+            row = c.fetchone()
+            count = row[0] if row else 0
+            return count > 0
+        except Exception:
+            return False
+
     def check_missed_buys(self, current_price):
         """
-        Catch-up buys: find empty zones below current price missed
-        while bot was offline. Buy at current price, sell target is
-        buy price + one full step — guaranteed profit on recovery.
-        Fills closest zones first, up to max_catchup_zones.
+        Catch-up buys: recover zones missed during a network disconnection.
+
+        IMPORTANT: This ONLY triggers when there is existing trade history
+        in the database, indicating the bot was previously running and went
+        offline (e.g. lost cell connection). On a cold/fresh start with no
+        history, catch-up is skipped entirely — there is nothing to recover.
+
+        When catch-up IS appropriate:
+        - Only fills zones within CATCHUP_PROXIMITY (3) grid levels of the
+          current price, not all empty zones below.
+        - Buys at the zone's upper boundary (where the grid trigger would
+          have fired), not at the current market price.
+        - Sell target is set one full grid step above the zone entry price.
         """
+        # ── Guard: skip on cold starts ──────────────────────────────
+        if not self._has_trade_history():
+            log.info("Cold start detected (no trade history) — "
+                     "skipping catch-up buys")
+            return
+
+        CATCHUP_PROXIMITY = 3  # only recover zones within 3 levels
+
         current_zone  = get_current_zone(current_price, self.grid_levels)
         catchup_count = 0
         caught_zones  = []
 
+        # Only look at zones close to the current price (within proximity)
+        lowest_zone = max(0, current_zone - CATCHUP_PROXIMITY)
+
         # Check zones below current zone, closest first
-        for i in range(current_zone - 1, -1, -1):
+        for i in range(current_zone - 1, lowest_zone - 1, -1):
             if catchup_count >= self.max_catchup_zones:
                 break
             if self.zone_holding[i]:
@@ -496,40 +532,46 @@ class PaperTrader:
                 log.warning("Insufficient USDT for catch-up buy — stopping")
                 break
 
-            xrp_amount                      = self.order_size / current_price
-            sell_target                     = round(current_price + self.step_size, 4)
+            # Use the zone's upper boundary as the entry price
+            # (this is where the grid would have triggered the buy)
+            zone_entry_price = self.grid_levels[i + 1]
+            xrp_amount       = self.order_size / zone_entry_price
+            sell_target       = round(zone_entry_price + self.step_size, 4)
+
             self.usdt_balance              -= self.order_size
             self.xrp_balance               += xrp_amount
             self.total_trades              += 1
             self.zone_holding[i]            = True
-            self.zone_buy_price[i]          = current_price
+            self.zone_buy_price[i]          = zone_entry_price
             self.zone_sell_target[i]        = sell_target
             self.zone_is_catchup[i]         = True
             catchup_count                  += 1
 
-            # NEW: Calculate fees for catch-up (taker fee - market order)
+            # Calculate fees for catch-up (taker fee — market order)
             fees = self.order_size * TAKER_FEE_PCT
             self.total_fees_paid += fees
 
-            log_trade("BUY", current_price, xrp_amount, self.order_size,
+            log_trade("BUY", zone_entry_price, xrp_amount, self.order_size,
                       i, 0, self.portfolio_value(current_price),
-                      current_price, current_price, sell_target,
-                      fees, "catch-up buy")
-            log_catchup_trade(i, current_price, sell_target)
+                      current_price, zone_entry_price, sell_target,
+                      fees, "catch-up buy (reconnect)")
+            log_catchup_trade(i, zone_entry_price, sell_target)
             caught_zones.append(
-                f"Zone {i}: entry ${current_price:.4f} "
-                f"→ sell ${sell_target:.4f}"
+                f"Zone {i} (${self.grid_levels[i]:.4f}-"
+                f"${self.grid_levels[i+1]:.4f}): "
+                f"entry ${zone_entry_price:.4f} → sell ${sell_target:.4f}"
             )
-            log.info(f"Catch-up buy zone {i} @ ${current_price:.4f} "
-                     f"sell target ${sell_target:.4f}")
+            log.info(f"Catch-up buy zone {i} @ ${zone_entry_price:.4f} "
+                     f"(zone boundary) sell target ${sell_target:.4f}")
 
         if caught_zones:
             send_telegram(
                 f"🔄 <b>Catch-up Buys ({len(caught_zones)})</b>\n"
-                f"Missed zones recovered @ ${current_price:.4f}\n\n"
+                f"Recovering zones near ${current_price:.4f} "
+                f"after reconnection\n\n"
                 + "\n".join(caught_zones) +
                 f"\n\nUSDT left: ${self.usdt_balance:.2f}\n"
-                f"Each zone sells one full step above entry."
+                f"Each zone sells one full step above zone entry."
             )
 
     def buy(self, price, usdt_amount, zone, is_taker=False):
