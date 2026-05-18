@@ -1,3 +1,4 @@
+from datetime import datetime
 """db.py
 Thread-safe SQLite helper for WAL mode and simple order table helpers.
 
@@ -379,3 +380,92 @@ def get_open_orders_from_db(exchange):
         (exchange,),
     )
     return c.fetchall()
+
+
+def log_catchup_trade(zone, entry_price, sell_target):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO catchup_trades
+        (timestamp, zone, entry_price, sell_target, completed)
+        VALUES (?, ?, ?, ?, 0)
+    """, (datetime.now().isoformat(), zone, entry_price, sell_target))
+    conn.commit()
+
+def complete_catchup_trade(zone, exit_price, profit_loss):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("""
+        UPDATE catchup_trades SET exit_price=?, profit_loss=?, completed=1
+        WHERE zone=? AND completed=0
+    """, (exit_price, profit_loss, zone))
+    conn.commit()
+
+def log_agent_decision(decision, applied=False, rejected=False):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO agent_decisions (
+            timestamp, old_lower, old_upper, old_levels, old_order_size,
+            old_max_catchup, new_lower, new_upper, new_levels, new_order_size,
+            new_max_catchup, next_interval_hours, reasoning, applied, rejected)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        datetime.now().isoformat(),
+        decision["old_lower"], decision["old_upper"],
+        decision["old_levels"], decision["old_order_size"],
+        decision["old_max_catchup"],
+        decision["new_lower"], decision["new_upper"],
+        decision["new_levels"], decision["new_order_size"],
+        decision["new_max_catchup"],
+        decision["next_interval_hours"],
+        decision["reasoning"],
+        1 if applied else 0,
+        1 if rejected else 0
+    ))
+    conn.commit()
+
+def get_last_trades(n=5):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("""
+        SELECT timestamp, side, price, amount, profit_loss, grid_level, sell_target
+        FROM trades ORDER BY id DESC LIMIT ?
+    """, (n,))
+    return c.fetchall()
+
+def get_open_trades_from_db(limit=25):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("""
+        SELECT id, timestamp, side, price, amount, grid_level, sell_target
+        FROM trades
+        WHERE side IN ('BUY', 'SELL')
+        ORDER BY id ASC
+    """)
+    rows = c.fetchall()
+
+    zone_queues = {}
+    for trade_id, ts, side, price, amount, zone, sell_target in rows:
+        if zone is None:
+            continue
+        if side == "BUY":
+            zone_queues.setdefault(zone, []).append({
+                "id": trade_id,
+                "timestamp": ts,
+                "price": price,
+                "amount": amount,
+                "zone": zone,
+                "sell_target": sell_target or 0.0,
+            })
+        elif side == "SELL":
+            q = zone_queues.get(zone)
+            if q:
+                q.pop(0)
+
+    open_trades = []
+    for q in zone_queues.values():
+        open_trades.extend(q)
+
+    open_trades.sort(key=lambda t: t["id"], reverse=True)
+    return open_trades[:limit]

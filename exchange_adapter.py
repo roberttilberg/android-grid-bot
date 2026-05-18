@@ -3,11 +3,11 @@ Simple synchronous CCXT adapter with retry/backoff helpers.
 Keep calls centralized so grid logic can call a single adapter and
 benefit from common retry/error handling appropriate for Termux devices.
 """
+import asyncio
 import logging
-import time
 from functools import wraps
 
-import ccxt
+import ccxt.pro as ccxt
 
 log = logging.getLogger("gridbot.exchange")
 
@@ -15,11 +15,11 @@ log = logging.getLogger("gridbot.exchange")
 def retry(max_attempts=5, base_delay=0.5):
     def deco(f):
         @wraps(f)
-        def wrapper(*args, **kwargs):
+        async def wrapper(*args, **kwargs):
             attempt = 0
             while True:
                 try:
-                    return f(*args, **kwargs)
+                    return await f(*args, **kwargs)
                 except ccxt.AuthenticationError:
                     # Authentication errors (e.g. IP not whitelisted) are permanent;
                     # retrying will not help.
@@ -39,7 +39,7 @@ def retry(max_attempts=5, base_delay=0.5):
                         e,
                         delay,
                     )
-                    time.sleep(delay)
+                    await asyncio.sleep(delay)
         return wrapper
     return deco
 
@@ -75,17 +75,17 @@ class ExchangeAdapter:
         self.exchange_id = exchange_id
 
     @retry()
-    def fetch_ticker(self, symbol):
-        return self.exchange.fetch_ticker(symbol)
+    async def fetch_ticker(self, symbol):
+        return await self.exchange.fetch_ticker(symbol)
 
     @retry()
-    def fetch_ohlcv(self, symbol, timeframe="1h", limit=500):
+    async def fetch_ohlcv(self, symbol, timeframe="1h", limit=500):
         # Phemex OHLCV can reject settle-suffixed symbols like XRP/USDT:USDT.
         # Try normalized symbol first, then fallback to original.
         if self.exchange_id == "phemex" and ":" in str(symbol):
             normalized = str(symbol).split(":", 1)[0]
             try:
-                return self.exchange.fetch_ohlcv(
+                return await self.exchange.fetch_ohlcv(
                     normalized,
                     timeframe=timeframe,
                     limit=limit,
@@ -97,30 +97,30 @@ class ExchangeAdapter:
                     symbol,
                     first_error,
                 )
-        return self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+        return await self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
 
     @retry()
-    def create_limit_order(self, symbol, side, price, amount):
-        return self.exchange.create_order(symbol, "limit", side, amount, price)
+    async def create_limit_order(self, symbol, side, price, amount):
+        return await self.exchange.create_order(symbol, "limit", side, amount, price)
 
     @retry()
-    def create_market_order(self, symbol, side, amount):
-        return self.exchange.create_order(symbol, "market", side, amount)
+    async def create_market_order(self, symbol, side, amount):
+        return await self.exchange.create_order(symbol, "market", side, amount)
 
     @retry()
-    def cancel_order(self, order_id, symbol=None):
+    async def cancel_order(self, order_id, symbol=None):
         if symbol:
-            return self.exchange.cancel_order(order_id, symbol)
-        return self.exchange.cancel_order(order_id)
+            return await self.exchange.cancel_order(order_id, symbol)
+        return await self.exchange.cancel_order(order_id)
 
     @retry()
-    def fetch_order(self, order_id, symbol=None):
+    async def fetch_order(self, order_id, symbol=None):
         if symbol:
-            return self.exchange.fetch_order(order_id, symbol)
-        return self.exchange.fetch_order(order_id)
+            return await self.exchange.fetch_order(order_id, symbol)
+        return await self.exchange.fetch_order(order_id)
 
     @retry()
-    def fetch_open_orders(self, symbol=None):
+    async def fetch_open_orders(self, symbol=None):
         if symbol:
-            return self.exchange.fetch_open_orders(symbol)
-        return self.exchange.fetch_open_orders()
+            return await self.exchange.fetch_open_orders(symbol)
+        return await self.exchange.fetch_open_orders()
