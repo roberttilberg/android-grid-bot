@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from datetime import datetime
 
@@ -6,12 +7,70 @@ import db as orders_db
 from core.config import *
 from core.telegram_handler import send_telegram
 from db import complete_catchup_trade, get_open_trades_from_db, log_catchup_trade
+from core.analytics import get_catchup_stats
 
 log = logging.getLogger('gridbot.trading')
 
 def _metrics_inc(*args): pass  # Placeholder for now
 def _emit_event(*args, **kwargs): pass  # Placeholder for now
-def log_trade(*args, **kwargs): pass  # Placeholder for now
+
+def log_trade(side, price, amount, usdt_value, grid_level, profit_loss,
+              balance_after, market_price, buy_price=0, sell_target=0,
+              fees=0, notes="", conn=None, commit=True):
+    """Insert a trade record into the database."""
+    return orders_db.insert_trade(
+        side, price, amount, usdt_value, grid_level, profit_loss,
+        balance_after, market_price,
+        buy_price=buy_price, sell_target=sell_target,
+        fees=fees, notes=notes,
+        timestamp=datetime.now().isoformat(),
+        conn=conn, commit=commit,
+    )
+
+def calculate_grid_levels(lower, upper, levels):
+    """Build an evenly-spaced list of grid price levels."""
+    step = (upper - lower) / levels
+    return [round(lower + i * step, 4) for i in range(levels + 1)]
+
+def get_current_zone(price, grid_levels):
+    """Return the zone index that contains the given price."""
+    for i in range(len(grid_levels) - 1):
+        if grid_levels[i] <= price < grid_levels[i + 1]:
+            return i
+    return len(grid_levels) - 2
+
+def get_runtime_mode_label():
+    """Return a human-readable label for the current runtime mode."""
+    if TEST_MODE_ENABLED:
+        return "TEST MODE"
+    return "LIVE" if EXECUTE_LIVE else "Paper Trading"
+
+def find_oldest_open_buy_price(zone):
+    """Look up the oldest unmatched BUY price for a zone from the DB."""
+    try:
+        conn = orders_db.get_conn()
+        c = conn.cursor()
+        c.execute(
+            "SELECT price FROM trades WHERE side='BUY' AND grid_level=? "
+            "ORDER BY id ASC LIMIT 1", (zone,)
+        )
+        row = c.fetchone()
+        return float(row[0]) if row else None
+    except Exception:
+        return None
+
+def normalize_remote_order(remote):
+    """Normalise a raw exchange order dict to a consistent schema."""
+    if not isinstance(remote, dict):
+        return {}
+    return {
+        "id": remote.get("id") or remote.get("orderId"),
+        "side": (remote.get("side") or "").upper(),
+        "price": remote.get("price") or remote.get("avgPrice") or 0,
+        "filled": remote.get("filled") or remote.get("executedQty") or 0,
+        "amount": remote.get("amount") or remote.get("origQty") or 0,
+        "status": remote.get("status") or remote.get("state") or "",
+    }
 
 def calculate_volatility(exchange, symbol, lookback=14):
     """Calculate recent price volatility using ATR-like method"""
@@ -142,7 +201,6 @@ async def reconcile_worker(adapter=None, symbol=None, exchange_id=None, trader=N
             reconcile_once(adapter, symbol, exchange_id, trader)
         except Exception as e:
             log.error(f"Reconciliation worker error: {e}")
-        import asyncio
         await asyncio.sleep(interval)
 
 class PaperTrader:
@@ -776,7 +834,7 @@ class PaperTrader:
             log.debug(f"Dynamic size adjustment: ${self.order_size} → ${dynamic_size} (vol: {volatility:.2%})")
 
         for i in range(self.num_zones):
-            self.grid_levels[i]
+            lower = self.grid_levels[i]
             upper = self.grid_levels[i + 1]
 
             # Price dropped into zone from above = BUY
@@ -799,7 +857,7 @@ class PaperTrader:
         holding_zones   = [i for i, s in enumerate(self.zone_holding) if s]
         holding_details = ""
         for z in holding_zones:
-            current_price - self.zone_buy_price[z]
+            unrealized_pnl = current_price - self.zone_buy_price[z]
             target  = self.zone_sell_target[z]
             needed  = target - current_price
             tag     = " 🔄" if self.zone_is_catchup[z] else ""
