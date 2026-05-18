@@ -18,6 +18,7 @@ IMPROVEMENTS ADDED:
 6. Performance analytics dashboard via Telegram
 """
 
+import asyncio
 import atexit
 import json
 import logging
@@ -29,19 +30,11 @@ import time
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 
-
-import asyncio
-from core.trading import PaperTrader, reconcile_worker
-from core.telegram_handler import telegram_listener, send_telegram
-from core.agent import run_agent, queue_simulated_agent_change
-from core.analytics import get_trade_stats, get_advanced_stats, get_catchup_stats, export_performance_csv, get_performance_summary
-
-import ccxt
-from dotenv import load_dotenv
-
-from core.config import *
 import db as orders_db
-from exchange_adapter import ExchangeAdapter
+from core.agent import run_agent
+from core.config import *
+from core.telegram_handler import send_telegram, telegram_listener
+from core.trading import PaperTrader, reconcile_worker
 
 # ============================================================
 
@@ -75,7 +68,7 @@ last_command_time = 0
 LOG_FILE         = os.path.expanduser("~/grid_bot.log")
 LOG_MAX_BYTES    = 5 * 1024 * 1024
 LOG_BACKUP_COUNT = 3
-LOCK_FILE        = os.path.expanduser("~/andriod_grid_bot_v1.lock")
+LOCK_FILE        = os.path.expanduser("~/android_grid_bot_v1.lock")
 
 # ============================================================
 # NEW: VOLATILITY & TREND SETTINGS

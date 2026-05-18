@@ -11,8 +11,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-LOCK_FILE = Path(os.path.expanduser("~/andriod_grid_bot_v1.lock"))
-BOT_FILE = Path(__file__).resolve().parent / "andriod_grid_bot_v1.py"
+LOCK_FILE = Path(os.path.expanduser("~/android_grid_bot_v1.lock"))
+BOT_FILE = Path(__file__).resolve().parent / "android_grid_bot_v1.py"
 
 
 def pid_running(pid):
