@@ -4,10 +4,40 @@ from datetime import datetime
 
 import core.config as config
 import db as orders_db
-from core.config import *
+from core.config import (
+    AGENT_INTERVAL_HOURS,
+    AUTO_REBALANCE_ENABLED,
+    EXCHANGE_ID,
+    EXECUTE_LIVE,
+    GRID_LEVELS,
+    GRID_LOWER,
+    GRID_REBALANCE_THRESHOLD,
+    GRID_UPPER,
+    MAKER_FEE_PCT,
+    MAX_CATCHUP_ZONES,
+    MAX_LOSS_PCT,
+    MAX_OPEN_ZONES,
+    MAX_TOTAL_TRADES,
+    MIN_PROFIT_RATIO,
+    ORDER_SIZE,
+    PAPER_BALANCE,
+    SYMBOL,
+    TAKER_FEE_PCT,
+    TEST_MODE_ENABLED,
+    TREND_BIAS_ENABLED,
+    TREND_THRESHOLD,
+    UNDERWATER_ALERT_THRESHOLD,
+    VOLATILITY_ADJUSTMENT,
+    VOLATILITY_LOOKBACK,
+    VOL_THRESHOLD_HIGH,
+    VOL_THRESHOLD_LOW,
+    pending_changes,
+    pending_lock,
+    stop_flag,
+)
+from core.analytics import get_catchup_stats
 from core.telegram_handler import send_telegram
 from db import complete_catchup_trade, get_open_trades_from_db, log_catchup_trade
-from core.analytics import get_catchup_stats
 
 log = logging.getLogger('gridbot.trading')
 
@@ -139,6 +169,86 @@ def detect_trend(exchange, symbol, lookback=20):
     except Exception as e:
         log.error(f"Trend detection error: {e}")
         return 'SIDEWAYS'
+
+def _reconcile_build_adapter(adapter, exchange_id):
+    """Return adapter; build a minimal one from ExchangeAdapter if not supplied."""
+    if adapter is not None:
+        return adapter
+    try:
+        from exchange_adapter import ExchangeAdapter
+        from core.config import API_KEY, API_SECRET
+        return ExchangeAdapter(exchange_id, API_KEY, API_SECRET)
+    except Exception as e:
+        log.warning("Could not build reconcile adapter: %s", e)
+        return None
+
+
+def _reconcile_sync_remote_orders(remote_orders, local_exchange_id):
+    """Insert any remote open orders not yet in the local DB."""
+    inserted = 0
+    for order in remote_orders:
+        try:
+            oid = order.get("id") or order.get("orderId")
+            sym = order.get("symbol", SYMBOL)
+            side = (order.get("side") or "").upper()
+            price = float(order.get("price") or 0)
+            amount = float(order.get("amount") or order.get("origQty") or 0)
+            status = order.get("status") or "open"
+            if not oid:
+                continue
+            existing = orders_db.find_order_by_exchange_id(local_exchange_id, oid)
+            if existing:
+                continue
+            orders_db.insert_order(
+                local_exchange_id, oid, sym, side, price, amount,
+                status=status, processed=0,
+            )
+            inserted += 1
+        except Exception as e:
+            log.debug("Could not sync remote order: %s", e)
+    return inserted
+
+
+def _reconcile_update_db_open(adapter, db_open, local_exchange_id):
+    """Refresh status/filled for locally-open orders by fetching from exchange."""
+    updated = 0
+    for row in db_open:
+        try:
+            oid = row["exchange_order_id"]
+            remote = adapter.fetch_order(oid, row["symbol"] or None)
+            if not remote:
+                continue
+            norm = normalize_remote_order(remote)
+            orders_db.update_order_by_exchange_id(
+                local_exchange_id, oid,
+                filled=norm.get("filled") or 0,
+                status=norm.get("status") or "open",
+            )
+            updated += 1
+        except Exception as e:
+            log.debug("Could not update order %s: %s",
+                      row.get("exchange_order_id"), e)
+    return updated
+
+
+def _reconcile_process_unprocessed(adapter, unproc, local_exchange_id, trader):
+    """Iterate unprocessed DB orders and log trade rows for any filled amounts."""
+    from android_grid_bot_v1 import (
+        _reconcile_process_single_row,
+    )
+    processed_count = 0
+    for row in unproc:
+        try:
+            processed_count += _reconcile_process_single_row(
+                adapter, row, local_exchange_id, trader
+            )
+        except Exception as e:
+            exch_id = row.get("exchange_order_id", "unknown")
+            log.error(
+                "Reconciliation: failed to log trade for %s: %s", exch_id, e
+            )
+    return processed_count
+
 
 def reconcile_once(adapter=None, symbol=None, exchange_id=None, trader=None):
     """Fetch open orders from exchange and ensure local orders table matches."""
@@ -834,7 +944,6 @@ class PaperTrader:
             log.debug(f"Dynamic size adjustment: ${self.order_size} → ${dynamic_size} (vol: {volatility:.2%})")
 
         for i in range(self.num_zones):
-            lower = self.grid_levels[i]
             upper = self.grid_levels[i + 1]
 
             # Price dropped into zone from above = BUY
@@ -857,7 +966,6 @@ class PaperTrader:
         holding_zones   = [i for i, s in enumerate(self.zone_holding) if s]
         holding_details = ""
         for z in holding_zones:
-            unrealized_pnl = current_price - self.zone_buy_price[z]
             target  = self.zone_sell_target[z]
             needed  = target - current_price
             tag     = " 🔄" if self.zone_is_catchup[z] else ""
