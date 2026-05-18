@@ -8,7 +8,6 @@ from datetime import datetime
 import requests
 
 import core.config as config
-from core.config import *
 import db as orders_db
 from core.agent import queue_simulated_agent_change, run_agent
 from core.analytics import (
@@ -25,6 +24,7 @@ from core.analytics import (
     get_performance_summary,
     get_trade_stats,
 )
+from core.config import *
 
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')

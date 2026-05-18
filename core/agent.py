@@ -1,10 +1,11 @@
 import json
 import logging
 from datetime import datetime, timedelta
+
 import core.config as config
+from core.analytics import get_trade_stats
 from core.config import *
-from core.analytics import get_trade_stats, get_catchup_stats
-import db as orders_db
+
 log = logging.getLogger('gridbot.agent')
 
 def queue_simulated_agent_change(trader, current_price, approval_seconds=30):
@@ -78,7 +79,7 @@ def call_groq(prompt):
         return None
 
 def run_agent(trader, current_price):
-    
+
 
     if config.TEST_MODE_ENABLED:
         log.info("[TESTMODE] run_agent intercepted; queuing simulated decision.")
@@ -215,7 +216,7 @@ Respond with ONLY this JSON, no other text:
 
 def apply_pending_changes(trader):
     # global config.pending_changes handled by config, config.GRID_LOWER, config.GRID_UPPER, config.GRID_LEVELS
-    
+
 
 
     try:

@@ -1,10 +1,9 @@
 import logging
-import core.config as config
-from core.config import *
 
 import pandas as pd
 
 import db as orders_db
+from core.config import *
 
 log = logging.getLogger("gridbot.analytics")
 
