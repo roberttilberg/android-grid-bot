@@ -432,21 +432,58 @@ def _extract_fill_info(row, norm):
     return filled_amt, status, side, price
 
 
-def _infer_zone_for_order(trader, side, price):
+def _infer_zone_for_order(trader, side, price):  # noqa: C901
     """Infer the grid zone for a filled order using in-memory trader state."""
     if trader is None or not getattr(trader, "grid_levels", None):
         return None
     try:
         if side == "BUY":
+            # BUY can be either long-open or short-close; prefer matching
+            # active short cover targets first.
+            if hasattr(trader, "_is_short_zone"):
+                for zi in range(trader.num_zones):
+                    if not trader._is_short_zone(zi):
+                        continue
+                    st = trader.zone_sell_target[zi]
+                    if st and abs(st - price) <= (trader.step_size * 0.0005):
+                        return zi
             return get_current_zone(price, trader.grid_levels)
         if side == "SELL":
+            # SELL can be long-close or short-open; first try matching active
+            # long sell targets, then fallback to price zone for short-open.
             for zi in range(trader.num_zones):
+                if hasattr(trader, "_is_long_zone") and not trader._is_long_zone(zi):
+                    continue
                 st = trader.zone_sell_target[zi]
                 if st and abs(st - price) <= (trader.step_size * 0.0001):
                     return zi
+            return get_current_zone(price, trader.grid_levels)
     except Exception:
         pass
     return None
+
+
+def _classify_reconcile_intent(trader, side, zone):
+    """Classify a filled order into long/short open/close intent."""
+    if side == "BUY":
+        if (
+            trader is not None and zone is not None and hasattr(trader, "_is_short_zone")
+            and 0 <= zone < trader.num_zones and trader._is_short_zone(zone)
+        ):
+            return "short_close"
+        return "long_open"
+
+    if side == "SELL":
+        if (
+            trader is not None and zone is not None and hasattr(trader, "_is_long_zone")
+            and 0 <= zone < trader.num_zones and trader._is_long_zone(zone)
+        ):
+            return "long_close"
+        if ALLOW_SHORTS:
+            return "short_open"
+        return "long_close"
+
+    return "unknown"
 
 
 def _extract_fee_cost(remote, norm):
@@ -468,33 +505,60 @@ def _extract_fee_cost(remote, norm):
 def _reconcile_log_buy(
     local_exchange_id, exch_id, trader, price, trade_amount,
     usdt_value, zone, filled_amt, status, is_full, fee_cost, market_price,
+    intent="long_open",
 ):
     """Atomically log a reconciled BUY fill and update in-memory grid state."""
     notes = f"reconciled_buy;order={exch_id}"
     sell_target = round(price + (trader.step_size if trader else 0), 4) if trader else 0
+    buy_price = price
+    profit_loss = 0
+    if intent == "short_close":
+        notes = f"reconciled_short_close;order={exch_id}"
+        sell_target = trader.zone_sell_target[zone] if trader is not None and zone is not None else 0
+        buy_price = trader.zone_buy_price[zone] if trader is not None and zone is not None else 0
+        buy_fee_est = trade_amount * price * MAKER_FEE_PCT
+        sell_fee_est = trade_amount * (buy_price or 0) * MAKER_FEE_PCT if buy_price else 0.0
+        total_fee = fee_cost if fee_cost and fee_cost > 0 else (buy_fee_est + sell_fee_est)
+        profit_loss = (buy_price - price) * trade_amount - total_fee if buy_price else -total_fee
+    else:
+        total_fee = fee_cost
+
     processed_fields = {"filled": filled_amt, "status": status}
     if is_full:
         processed_fields["processed"] = 1
     with orders_db.transaction() as tx_conn:
         trade_id = log_trade(
-            "BUY", price, trade_amount, usdt_value, zone, 0,
+            "BUY", price, trade_amount, usdt_value, zone, profit_loss,
             trader.portfolio_value(market_price) if trader and market_price else None,
-            market_price or price, price, sell_target, fee_cost, notes,
+            market_price or price, buy_price, sell_target, total_fee, notes,
             conn=tx_conn, commit=False,
         )
         if trade_id and exch_id:
             orders_db.insert_order_trade_mapping(
                 local_exchange_id, exch_id, trade_id,
-                "BUY", price, trade_amount, fee_cost,
+                "BUY", price, trade_amount, total_fee,
                 conn=tx_conn, commit=False,
             )
         orders_db.update_order_by_exchange_id(
             local_exchange_id, exch_id, conn=tx_conn, commit=False, **processed_fields,
         )
     if trader is not None and zone is not None and 0 <= zone < trader.num_zones:
-        trader.zone_holding[zone] = True
-        trader.zone_buy_price[zone] = price
-        trader.zone_sell_target[zone] = round(price + trader.step_size, 4)
+        if intent == "short_close":
+            if hasattr(trader, "_clear_zone") and is_full:
+                trader._clear_zone(zone)
+        elif hasattr(trader, "_set_zone_long"):
+            trader._set_zone_long(
+                zone,
+                price,
+                round(price + trader.step_size, 4),
+                is_catchup=False,
+                base_amount=filled_amt,
+                entry_notional=filled_amt * price,
+            )
+        else:
+            trader.zone_holding[zone] = True
+            trader.zone_buy_price[zone] = price
+            trader.zone_sell_target[zone] = round(price + trader.step_size, 4)
 
 
 def _resolve_buy_price_for_sell(trader, zone, price_for_log):
@@ -515,12 +579,63 @@ def _resolve_buy_price_for_sell(trader, zone, price_for_log):
     return zone, buy_price
 
 
-def _reconcile_log_sell(
+def _reconcile_log_sell(  # noqa: C901
     local_exchange_id, exch_id, trader, remote, norm,
     price, trade_amount, usdt_value, zone,
     filled_amt, status, is_full, fee_cost, market_price,
+    intent="long_close",
 ):
     """Atomically log a reconciled SELL fill with P&L and update in-memory state."""
+    if intent == "short_open":
+        cover_target = round(price - (trader.step_size if trader else 0), 4)
+        notes = f"reconciled_short_open;order={exch_id}"
+        processed_fields = {"filled": filled_amt, "status": status}
+        if is_full:
+            processed_fields["processed"] = 1
+        with orders_db.transaction() as tx_conn:
+            trade_id = log_trade(
+                "SELL", price, trade_amount, usdt_value, zone, 0,
+                trader.portfolio_value(market_price) if trader and market_price else 0,
+                market_price or price,
+                price,
+                cover_target,
+                fee_cost,
+                notes,
+                conn=tx_conn,
+                commit=False,
+            )
+            if trade_id and exch_id:
+                orders_db.insert_order_trade_mapping(
+                    local_exchange_id,
+                    exch_id,
+                    trade_id,
+                    "SELL",
+                    price,
+                    trade_amount,
+                    fee_cost,
+                    conn=tx_conn,
+                    commit=False,
+                )
+            orders_db.update_order_by_exchange_id(
+                local_exchange_id,
+                exch_id,
+                conn=tx_conn,
+                commit=False,
+                **processed_fields,
+            )
+        if (
+            trader is not None and zone is not None and 0 <= zone < trader.num_zones
+            and hasattr(trader, "_set_zone_short")
+        ):
+            trader._set_zone_short(
+                zone,
+                price,
+                cover_target,
+                base_amount=filled_amt,
+                entry_notional=filled_amt * price,
+            )
+        return
+
     zone, buy_price = _resolve_buy_price_for_sell(trader, zone, price)
     order_type = ""
     try:
@@ -555,9 +670,12 @@ def _reconcile_log_sell(
             local_exchange_id, exch_id, conn=tx_conn, commit=False, **processed_fields,
         )
     if trader is not None and zone is not None and 0 <= zone < trader.num_zones and is_full:
-        trader.zone_holding[zone] = False
-        trader.zone_buy_price[zone] = 0.0
-        trader.zone_sell_target[zone] = 0.0
+        if hasattr(trader, "_clear_zone"):
+            trader._clear_zone(zone)
+        else:
+            trader.zone_holding[zone] = False
+            trader.zone_buy_price[zone] = 0.0
+            trader.zone_sell_target[zone] = 0.0
 
 
 def _reconcile_fetch_order_for_row(adapter, row):
@@ -609,6 +727,7 @@ def _reconcile_process_single_row(adapter, row, local_exchange_id, trader):
     filled_amt, status, side, price, is_full = fill_state
 
     zone = _infer_zone_for_order(trader, side, price)
+    intent = _classify_reconcile_intent(trader, side, zone)
     fee_cost = _extract_fee_cost(remote, norm)
     market_price = _reconcile_get_market_price(adapter)
 
@@ -631,12 +750,14 @@ def _reconcile_process_single_row(adapter, row, local_exchange_id, trader):
         _reconcile_log_buy(
             local_exchange_id, exch_id, trader, price, delta_amt,
             usdt_value, zone, filled_amt, status, is_full, fee_cost, market_price,
+            intent=intent,
         )
     elif side == "SELL":
         _reconcile_log_sell(
             local_exchange_id, exch_id, trader, remote, norm,
             price, delta_amt, usdt_value, zone,
             filled_amt, status, is_full, fee_cost, market_price,
+            intent=intent,
         )
     return 1 if is_full else 0
 
@@ -677,6 +798,11 @@ def get_current_zone(price, grid_levels):
 
 def get_exchange():
     """Build a synchronous exchange adapter for trading + reconciliation."""
+    if EXCHANGE_ID == "mock":
+        from core.mock_exchange_adapter import MockExchangeAdapter
+
+        return MockExchangeAdapter(exchange_id="mock")
+
     options = None
     if EXCHANGE_ID == "phemex":
         options = {"defaultType": "swap"}
@@ -698,6 +824,54 @@ def get_price(exchange):
         return get_simulated_price()
     ticker = exchange.fetch_ticker(SYMBOL)
     return ticker["last"]
+
+
+def _validate_live_execution_safety():
+    """Fail fast if live mode is enabled without explicit safety acknowledgements."""
+    if SHORT_MODE not in {"margin", "futures"}:
+        raise SystemExit(
+            "ERROR: SHORT_MODE must be either 'margin' or 'futures'."
+        )
+
+    if not EXECUTE_LIVE:
+        return
+
+    if ALLOW_SHORTS and not EXCHANGE_TESTNET and not ALLOW_MAINNET_SHORTS:
+        raise SystemExit(
+            "ERROR: ALLOW_SHORTS=true on mainnet requires ALLOW_MAINNET_SHORTS=true."
+        )
+
+    if EXCHANGE_TESTNET:
+        return
+    if not ALLOW_MAINNET_LIVE:
+        raise SystemExit(
+            "ERROR: EXECUTE_LIVE=true with EXCHANGE_TESTNET=false is blocked. "
+            "Set ALLOW_MAINNET_LIVE=true only after manual review."
+        )
+    if not LIVE_ACCOUNT_ISOLATED:
+        raise SystemExit(
+            "ERROR: LIVE_ACCOUNT_ISOLATED=true is required for mainnet live mode. "
+            "Use an isolated/sub-account with limited funds and no withdrawals."
+        )
+
+
+def _validate_short_execution_capability(exchange):
+    """Validate adapter/exchange shorting support when shorts are enabled."""
+    if not ALLOW_SHORTS:
+        return
+    try:
+        if hasattr(exchange, "validate_shorting_requirements"):
+            exchange.validate_shorting_requirements(short_mode=SHORT_MODE)
+            return
+        if hasattr(exchange, "supports_shorting"):
+            if exchange.supports_shorting(short_mode=SHORT_MODE):
+                return
+        raise ValueError("adapter does not expose shorting capability checks")
+    except Exception as exc:
+        raise SystemExit(
+            "ERROR: Shorting is enabled but the configured exchange/account mode "
+            f"is not supported ({exc})."
+        ) from exc
 
 
 # ============================================================
@@ -724,6 +898,34 @@ def _start_bot_threads(trader, exchange, start_offset):
 
 
 def _log_bot_startup_info():
+    network_label = "testnet" if EXCHANGE_TESTNET else "mainnet"
+    runtime_label = "LIVE" if EXECUTE_LIVE else "PAPER"
+    log.info(
+        "STARTUP MODE | exchange=%s | network=%s | runtime=%s | market_type=%s | symbol=%s",
+        EXCHANGE_ID,
+        network_label,
+        runtime_label,
+        EXCHANGE_MARKET_TYPE,
+        SYMBOL,
+    )
+    if EXECUTE_LIVE and not EXCHANGE_TESTNET:
+        log.warning(
+            "LIVE MAINNET EXECUTION ENABLED | account_isolated=%s",
+            LIVE_ACCOUNT_ISOLATED,
+        )
+    elif EXECUTE_LIVE and EXCHANGE_TESTNET:
+        log.warning("LIVE TESTNET EXECUTION ENABLED")
+
+    if ALLOW_SHORTS:
+        log.warning(
+            "SHORTS ENABLED | mode=%s | max_short_zones=%s | max_short_notional=%.2f",
+            SHORT_MODE,
+            MAX_SHORT_ZONES,
+            MAX_SHORT_NOTIONAL,
+        )
+    else:
+        log.info("SHORTS DISABLED")
+
     log.info("Starting XRP/USDT Grid Bot with Agent (Paper Trading)")
     log.info("IMPROVEMENTS ACTIVE:")
     log.info("  - Dynamic position sizing (volatility-based)")
@@ -873,11 +1075,13 @@ def _send_shutdown_message(trader, exchange):
 async def run_bot():
     global AGENT_INTERVAL_HOURS
 
+    _validate_live_execution_safety()
     acquire_single_instance_lock()
     _log_bot_startup_info()
     init_db()
 
     exchange = get_exchange()
+    _validate_short_execution_capability(exchange)
     grid_levels = calculate_grid_levels(GRID_LOWER, GRID_UPPER, GRID_LEVELS)
     trader = PaperTrader(PAPER_BALANCE, grid_levels)
     try:

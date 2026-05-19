@@ -35,6 +35,32 @@ BINANCE_TESTNET_API_SECRET=your_secret_here
 EXECUTE_LIVE=false
 ```
 
+Sandbox-free API lifecycle testing (no exchange account required):
+
+```bash
+EXCHANGE_ID=mock
+EXECUTE_LIVE=false
+```
+
+Mainnet live safety gates (required together when `EXCHANGE_TESTNET=false` and
+`EXECUTE_LIVE=true`):
+
+```bash
+ALLOW_MAINNET_LIVE=true
+LIVE_ACCOUNT_ISOLATED=true
+```
+
+Short-trading safety gates (default disabled):
+
+```bash
+ALLOW_SHORTS=false
+SHORT_MODE=futures
+MAX_SHORT_ZONES=3
+MAX_SHORT_NOTIONAL=50
+MIN_MARGIN_RATIO=1.5
+ALLOW_MAINNET_SHORTS=false
+```
+
 When you are ready for live test mode on testnet, set:
 
 ```bash
@@ -92,11 +118,28 @@ Binance testnet go-live checklist:
 - Flip `EXECUTE_LIVE=true` only after confirming successful startup + reconciliation.
 - Keep position sizing conservative for first live test cycles.
 
+Mainnet go-live checklist (if you cannot use a futures sandbox):
+
+- Use an isolated/sub-account with only bot funds.
+- Keep withdrawal permission disabled on API keys.
+- Keep startup safety flags explicit (`ALLOW_MAINNET_LIVE=true`, `LIVE_ACCOUNT_ISOLATED=true`).
+- Confirm `/live status` before and after enabling execution.
+
+Short rollout checklist:
+
+- Keep `ALLOW_SHORTS=false` until paper and reconcile tests pass locally.
+- Enable shorts in paper mode first (`ALLOW_SHORTS=true`, `EXECUTE_LIVE=false`) and verify `/positions`, `/risk`, and `/close-shorts` behavior.
+- For mainnet shorts, require all of: `ALLOW_MAINNET_LIVE=true`, `LIVE_ACCOUNT_ISOLATED=true`, `ALLOW_MAINNET_SHORTS=true`.
+- Start with tiny notional and verify margin estimate via `/risk` before scaling.
+
 8) Runtime observability (Telegram + logs)
 
 The bot now exposes runtime metrics and structured events:
 
 - Telegram command: `/metrics`
+- Telegram command: `/positions`
+- Telegram command: `/risk`
+- Telegram command: `/close-shorts`
 - Main log file: `~/grid_bot.log`
 - Single-instance lock file: `~/android_grid_bot_v1.lock`
 - Structured event entries are JSON objects embedded in log lines.

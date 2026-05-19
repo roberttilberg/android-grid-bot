@@ -78,6 +78,36 @@ class ExchangeAdapter:
         self.exchange_id = exchange_id
         self.testnet = bool(testnet)
 
+    def supports_shorting(self, short_mode="futures"):
+        """Return whether the configured exchange is expected to support shorts."""
+        mode = (short_mode or "").strip().lower()
+        options = getattr(self.exchange, "options", {}) or {}
+        default_type = str(options.get("defaultType", "")).lower()
+
+        if self.exchange_id == "mock":
+            return True
+
+        if mode == "futures":
+            # Binance/Phemex futures require a futures/swap market type.
+            if self.exchange_id in {"binance", "phemex"}:
+                return default_type in {"future", "futures", "swap"}
+            # Conservative default for unknown exchanges.
+            return False
+
+        if mode == "margin":
+            # Margin support is exchange-account specific; allow runtime check path.
+            return self.exchange_id in {"binance", "phemex"}
+
+        return False
+
+    def validate_shorting_requirements(self, short_mode="futures"):
+        """Raise ValueError when shorting mode is unsupported by this adapter."""
+        if not self.supports_shorting(short_mode=short_mode):
+            raise ValueError(
+                "Short mode unsupported for configured exchange/options: "
+                f"exchange={self.exchange_id}, short_mode={short_mode}"
+            )
+
     @retry()
     def fetch_ticker(self, symbol):
         return self.exchange.fetch_ticker(symbol)

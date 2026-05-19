@@ -64,6 +64,22 @@ EXCHANGE_TESTNET = os.getenv("EXCHANGE_TESTNET", "false").lower() in (
     "1", "true", "yes"
 )
 EXCHANGE_MARKET_TYPE = os.getenv("EXCHANGE_MARKET_TYPE", "spot").strip().lower()
+ALLOW_MAINNET_LIVE = os.getenv("ALLOW_MAINNET_LIVE", "false").lower() in (
+    "1", "true", "yes"
+)
+LIVE_ACCOUNT_ISOLATED = os.getenv("LIVE_ACCOUNT_ISOLATED", "false").lower() in (
+    "1", "true", "yes"
+)
+ALLOW_SHORTS = os.getenv("ALLOW_SHORTS", "false").lower() in (
+    "1", "true", "yes"
+)
+MAX_SHORT_ZONES = int(os.getenv("MAX_SHORT_ZONES", "3"))
+MAX_SHORT_NOTIONAL = float(os.getenv("MAX_SHORT_NOTIONAL", "50"))
+MIN_MARGIN_RATIO = float(os.getenv("MIN_MARGIN_RATIO", "1.5"))
+SHORT_MODE = os.getenv("SHORT_MODE", "futures").strip().lower()
+ALLOW_MAINNET_SHORTS = os.getenv("ALLOW_MAINNET_SHORTS", "false").lower() in (
+    "1", "true", "yes"
+)
 
 
 def _read_exchange_credential(kind):

@@ -7,6 +7,7 @@ import db as orders_db
 from core.analytics import get_catchup_stats
 from core.config import (
     AGENT_INTERVAL_HOURS,
+    ALLOW_SHORTS,
     AUTO_REBALANCE_ENABLED,
     EXCHANGE_ID,
     GRID_LEVELS,
@@ -17,10 +18,14 @@ from core.config import (
     MAX_CATCHUP_ZONES,
     MAX_LOSS_PCT,
     MAX_OPEN_ZONES,
+    MAX_SHORT_NOTIONAL,
+    MAX_SHORT_ZONES,
     MAX_TOTAL_TRADES,
+    MIN_MARGIN_RATIO,
     MIN_PROFIT_RATIO,
     ORDER_SIZE,
     PAPER_BALANCE,
+    SHORT_MODE,
     SYMBOL,
     TAKER_FEE_PCT,
     TEST_MODE_ENABLED,
@@ -94,7 +99,7 @@ def normalize_remote_order(remote):
         return {}
     return {
         "id": remote.get("id") or remote.get("orderId"),
-            f"Mode: {'LIVE' if config.EXECUTE_LIVE else 'Paper Trading'}\n"
+        "side": (remote.get("side") or "").upper(),
         "price": remote.get("price") or remote.get("avgPrice") or 0,
         "filled": remote.get("filled") or remote.get("executedQty") or 0,
         "amount": remote.get("amount") or remote.get("origQty") or 0,
@@ -173,6 +178,10 @@ def _reconcile_build_adapter(adapter, exchange_id):
     """Return adapter; build a minimal one from ExchangeAdapter if not supplied."""
     if adapter is not None:
         return adapter
+    if exchange_id == "mock":
+        from core.mock_exchange_adapter import MockExchangeAdapter
+
+        return MockExchangeAdapter(exchange_id="mock")
     try:
         from core.config import (
             API_KEY,
@@ -345,6 +354,9 @@ class PaperTrader:
         self.num_zones         = len(grid_levels) - 1
         self.step_size         = grid_levels[1] - grid_levels[0]
         self.min_move          = self.step_size * MIN_PROFIT_RATIO
+        self.zone_exposure     = [0] * self.num_zones  # -1 short, 0 flat, +1 long
+        self.zone_position_amount = [0.0] * self.num_zones
+        self.zone_entry_notional = [0.0] * self.num_zones
         self.zone_holding      = [False] * self.num_zones
         self.zone_buy_price    = [0.0]  * self.num_zones
         self.zone_sell_target  = [0.0]  * self.num_zones  # buy + one step
@@ -357,6 +369,132 @@ class PaperTrader:
 
         log.info(f"Grid step: ${self.step_size:.4f} | "
                  f"Min sell move: ${self.min_move:.4f}")
+
+    def _sync_zone_holding_from_exposure(self):
+        self.zone_holding = [exposure > 0 for exposure in self.zone_exposure]
+
+    def _is_long_zone(self, zone):
+        return self.zone_exposure[zone] > 0
+
+    def _is_short_zone(self, zone):
+        return self.zone_exposure[zone] < 0
+
+    def _is_flat_zone(self, zone):
+        return self.zone_exposure[zone] == 0
+
+    def _set_zone_long(self, zone, buy_price, sell_target, is_catchup=False, base_amount=None, entry_notional=None):
+        self.zone_exposure[zone] = 1
+        amount = base_amount if base_amount is not None else (self.order_size / buy_price if buy_price else 0.0)
+        notional = entry_notional if entry_notional is not None else self.order_size
+        self.zone_position_amount[zone] = max(0.0, float(amount or 0.0))
+        self.zone_entry_notional[zone] = max(0.0, float(notional or 0.0))
+        self.zone_buy_price[zone] = buy_price
+        self.zone_sell_target[zone] = sell_target
+        self.zone_is_catchup[zone] = is_catchup
+        self._sync_zone_holding_from_exposure()
+
+    def _set_zone_short(self, zone, entry_price, cover_target, base_amount, entry_notional):
+        self.zone_exposure[zone] = -1
+        self.zone_position_amount[zone] = max(0.0, float(base_amount or 0.0))
+        self.zone_entry_notional[zone] = max(0.0, float(entry_notional or 0.0))
+        self.zone_buy_price[zone] = entry_price
+        self.zone_sell_target[zone] = cover_target
+        self.zone_is_catchup[zone] = False
+        self._sync_zone_holding_from_exposure()
+
+    def _clear_zone(self, zone):
+        self.zone_exposure[zone] = 0
+        self.zone_position_amount[zone] = 0.0
+        self.zone_entry_notional[zone] = 0.0
+        self.zone_buy_price[zone] = 0.0
+        self.zone_sell_target[zone] = 0.0
+        self.zone_is_catchup[zone] = False
+        self._sync_zone_holding_from_exposure()
+
+    def _long_zone_count(self):
+        return sum(1 for exposure in self.zone_exposure if exposure > 0)
+
+    def _short_zone_count(self):
+        return sum(1 for exposure in self.zone_exposure if exposure < 0)
+
+    def _short_notional_open(self):
+        total = 0.0
+        for idx in range(self.num_zones):
+            if self.zone_exposure[idx] < 0:
+                total += self.zone_entry_notional[idx]
+        return total
+
+    def _margin_ratio_estimate(self, current_price):
+        # Simple paper-mode estimate: equity / gross short notional.
+        short_notional = 0.0
+        short_upnl = 0.0
+        for idx in range(self.num_zones):
+            if self.zone_exposure[idx] >= 0:
+                continue
+            amount = self.zone_position_amount[idx]
+            entry = self.zone_buy_price[idx]
+            short_notional += amount * current_price
+            short_upnl += (entry - current_price) * amount
+        if short_notional <= 0:
+            return float("inf")
+        equity = self.usdt_balance + self.xrp_balance * current_price + short_upnl
+        return equity / short_notional if short_notional else float("inf")
+
+    def get_positions_snapshot(self, current_price):
+        """Return a summary dict of long/short/flat zone exposure and notional."""
+        long_zones = []
+        short_zones = []
+        for idx in range(self.num_zones):
+            exposure = self.zone_exposure[idx]
+            if exposure > 0:
+                long_zones.append(idx)
+            elif exposure < 0:
+                short_zones.append(idx)
+        return {
+            "long_zones": long_zones,
+            "short_zones": short_zones,
+            "flat_zones": self.num_zones - len(long_zones) - len(short_zones),
+            "short_notional_open": self._short_notional_open(),
+            "margin_ratio_estimate": self._margin_ratio_estimate(current_price),
+        }
+
+    def get_risk_snapshot(self, current_price):
+        """Return current short risk posture against configured limits."""
+        short_count = self._short_zone_count()
+        short_notional = self._short_notional_open()
+        margin_ratio = self._margin_ratio_estimate(current_price)
+        return {
+            "allow_shorts": ALLOW_SHORTS,
+            "short_mode": SHORT_MODE,
+            "short_count": short_count,
+            "short_count_limit": MAX_SHORT_ZONES,
+            "short_notional": short_notional,
+            "short_notional_limit": MAX_SHORT_NOTIONAL,
+            "margin_ratio": margin_ratio,
+            "min_margin_ratio": MIN_MARGIN_RATIO,
+            "short_count_ok": short_count <= MAX_SHORT_ZONES,
+            "short_notional_ok": short_notional <= MAX_SHORT_NOTIONAL,
+            "margin_ratio_ok": margin_ratio == float("inf") or margin_ratio >= MIN_MARGIN_RATIO,
+        }
+
+    def _force_close_all_shorts(self, current_price, reason):
+        closed = 0
+        for zone in range(self.num_zones):
+            if not self._is_short_zone(zone):
+                continue
+            if self.close_short(current_price, self.order_size, zone, force=True):
+                closed += 1
+        if closed:
+            send_telegram(
+                f"🚨 <b>Emergency Short Close</b>\n"
+                f"Reason: {reason}\n"
+                f"Closed shorts: {closed}"
+            )
+        return closed
+
+    def emergency_close_shorts(self, current_price, reason="manual command"):
+        """Public wrapper for operator-initiated short emergency closure."""
+        return self._force_close_all_shorts(current_price, reason=reason)
 
     def restore_open_trades_from_db(self):
         """Restore open trades and order mappings into in-memory grid state on restart."""
@@ -378,10 +516,7 @@ class PaperTrader:
                 continue
             price = t["price"]
             sell_target = t["sell_target"] or round(price + self.step_size, 4)
-            self.zone_holding[zone] = True
-            self.zone_buy_price[zone] = price
-            self.zone_sell_target[zone] = sell_target
-            self.zone_is_catchup[zone] = False
+            self._set_zone_long(zone, price, sell_target, is_catchup=False, base_amount=t.get("amount"), entry_notional=(t.get("amount") or 0) * price)
             restored += 1
         log.info("Restored %d open trades from DB into grid state.", restored)
 
@@ -406,19 +541,20 @@ class PaperTrader:
         return trade_row, side, price, zone
 
     def _apply_mapping_to_zone_state(self, trade_row, side, price, zone):
-        if side == 'BUY' and not self.zone_holding[zone]:
-            self.zone_holding[zone] = True
-            self.zone_buy_price[zone] = price
+        if side == 'BUY' and self._is_flat_zone(zone):
             st = trade_row['sell_target'] if 'sell_target' in trade_row.keys() else None
-            self.zone_sell_target[zone] = st or round(price + self.step_size, 4)
             notes = trade_row['notes'] if 'notes' in trade_row.keys() else ''
-            self.zone_is_catchup[zone] = bool(notes and 'catch' in notes.lower())
+            self._set_zone_long(
+                zone,
+                price,
+                st or round(price + self.step_size, 4),
+                is_catchup=bool(notes and 'catch' in notes.lower()),
+                base_amount=trade_row['amount'] if 'amount' in trade_row.keys() else None,
+                entry_notional=(trade_row['amount'] * price) if 'amount' in trade_row.keys() and trade_row['amount'] else None,
+            )
             return 1
-        if side == 'SELL' and self.zone_holding[zone]:
-            self.zone_holding[zone] = False
-            self.zone_buy_price[zone] = 0.0
-            self.zone_sell_target[zone] = 0.0
-            self.zone_is_catchup[zone] = False
+        if side == 'SELL' and self._is_long_zone(zone):
+            self._clear_zone(zone)
             return 1
         return 0
 
@@ -454,6 +590,9 @@ class PaperTrader:
         self.num_zones         = len(new_grid_levels) - 1
         self.step_size         = new_grid_levels[1] - new_grid_levels[0]
         self.min_move          = self.step_size * MIN_PROFIT_RATIO
+        self.zone_exposure     = [0] * self.num_zones
+        self.zone_position_amount = [0.0] * self.num_zones
+        self.zone_entry_notional = [0.0] * self.num_zones
         self.zone_holding      = [False] * self.num_zones
         self.zone_buy_price    = [0.0]  * self.num_zones
         self.zone_sell_target  = [0.0]  * self.num_zones
@@ -468,6 +607,9 @@ class PaperTrader:
 
     def initialize_zones(self, current_price, trend='SIDEWAYS'):
         current_zone           = get_current_zone(current_price, self.grid_levels)
+        self.zone_exposure     = [0] * self.num_zones
+        self.zone_position_amount = [0.0] * self.num_zones
+        self.zone_entry_notional = [0.0] * self.num_zones
         self.zone_holding      = [False] * self.num_zones
         self.zone_buy_price    = [0.0]  * self.num_zones
         self.zone_sell_target  = [0.0]  * self.num_zones
@@ -506,10 +648,7 @@ class PaperTrader:
         sell_target                     = round(price + self.step_size, 4)
         self.usdt_balance              -= self.order_size
         self.xrp_balance               += xrp_amount
-        self.zone_holding[zone]         = True
-        self.zone_buy_price[zone]       = price
-        self.zone_sell_target[zone]     = sell_target
-        self.zone_is_catchup[zone]      = False
+        self._set_zone_long(zone, price, sell_target, is_catchup=False, base_amount=xrp_amount, entry_notional=self.order_size)
         log_trade("BUY", price, xrp_amount, self.order_size, zone, 0,
                   self.portfolio_value(price), price, price, sell_target,
                   0, "initial position")
@@ -542,10 +681,7 @@ class PaperTrader:
         sell_target = round(price + self.step_size, 4)
         self.usdt_balance -= self.order_size
         self.xrp_balance += xrp_amount
-        self.zone_holding[zone] = True
-        self.zone_buy_price[zone] = price
-        self.zone_sell_target[zone] = sell_target
-        self.zone_is_catchup[zone] = False
+        self._set_zone_long(zone, price, sell_target, is_catchup=False, base_amount=xrp_amount, entry_notional=self.order_size)
         log_trade("BUY", price, xrp_amount, self.order_size, zone, 0,
                   self.portfolio_value(price), price, price, sell_target,
                   0, "trend-biased initial")
@@ -590,7 +726,7 @@ class PaperTrader:
         """Return detailed health report of all positions"""
         health = []
         for i in range(self.num_zones):
-            if not self.zone_holding[i]:
+            if not self._is_long_zone(i):
                 continue
 
             buy_price = self.zone_buy_price[i]
@@ -627,6 +763,16 @@ class PaperTrader:
             log.warning(f"{len(underwater)} positions underwater > {threshold}%")
 
     def safety_check(self, current_price):
+        if ALLOW_SHORTS and self._short_zone_count() > 0:
+            margin_ratio = self._margin_ratio_estimate(current_price)
+            if margin_ratio < MIN_MARGIN_RATIO:
+                self._force_close_all_shorts(
+                    current_price,
+                    reason=(
+                        f"margin ratio {margin_ratio:.3f} below min {MIN_MARGIN_RATIO:.3f}"
+                    ),
+                )
+
         portfolio = self.portfolio_value(current_price)
         loss_pct  = ((self.start_balance - portfolio) / self.start_balance) * 100
         if loss_pct >= MAX_LOSS_PCT:
@@ -654,7 +800,7 @@ class PaperTrader:
         Handles missed sells from restarts or connection drops.
         """
         for i in range(self.num_zones):
-            if not self.zone_holding[i]:
+            if not self._is_long_zone(i):
                 continue
             sell_target = self.zone_sell_target[i]
             if current_price >= sell_target:
@@ -714,7 +860,7 @@ class PaperTrader:
         for i in range(current_zone - 1, lowest_zone - 1, -1):
             if catchup_count >= self.max_catchup_zones:
                 break
-            if self.zone_holding[i]:
+            if not self._is_flat_zone(i):
                 continue
             if self.usdt_balance < self.order_size:
                 log.warning("Insufficient USDT for catch-up buy — stopping")
@@ -729,10 +875,7 @@ class PaperTrader:
             self.usdt_balance              -= self.order_size
             self.xrp_balance               += xrp_amount
             self.total_trades              += 1
-            self.zone_holding[i]            = True
-            self.zone_buy_price[i]          = zone_entry_price
-            self.zone_sell_target[i]        = sell_target
-            self.zone_is_catchup[i]         = True
+            self._set_zone_long(i, zone_entry_price, sell_target, is_catchup=True, base_amount=xrp_amount, entry_notional=self.order_size)
             catchup_count                  += 1
 
             # Calculate fees for catch-up (taker fee — market order)
@@ -763,10 +906,10 @@ class PaperTrader:
             )
 
     def buy(self, price, usdt_amount, zone, is_taker=False):
-        if self.zone_holding[zone]:
+        if not self._is_flat_zone(zone):
             log.warning(f"Zone {zone} already holding — skipping")
             return False
-        if sum(self.zone_holding) >= MAX_OPEN_ZONES:
+        if self._long_zone_count() >= MAX_OPEN_ZONES:
             log.warning("Max open zones reached — skipping")
             return False
         if self.usdt_balance < usdt_amount:
@@ -815,10 +958,7 @@ class PaperTrader:
         self.usdt_balance          -= usdt_amount
         self.xrp_balance           += xrp_amount
         self.total_trades          += 1
-        self.zone_holding[zone]     = True
-        self.zone_buy_price[zone]   = price
-        self.zone_sell_target[zone] = sell_target
-        self.zone_is_catchup[zone]  = False
+        self._set_zone_long(zone, price, sell_target, is_catchup=False, base_amount=xrp_amount, entry_notional=usdt_amount)
 
         if exchange_order_id:
             with orders_db.transaction() as tx_conn:
@@ -848,8 +988,218 @@ class PaperTrader:
                  f"sell target ${sell_target:.4f} | fee: ${fees:.4f} | notes: {notes}")
         return True
 
+    def open_short(self, price, usdt_amount, zone, is_taker=False):  # noqa: C901
+        """Open a short position for a zone, if enabled and risk checks pass."""
+        if not ALLOW_SHORTS:
+            log.warning("Short entry requested but ALLOW_SHORTS=false")
+            return False
+        if not self._is_flat_zone(zone):
+            log.warning("Zone %s already has exposure — skipping short", zone)
+            return False
+        if self._short_zone_count() >= MAX_SHORT_ZONES:
+            log.warning("Max short zones reached — skipping short")
+            return False
+        if usdt_amount > MAX_SHORT_NOTIONAL:
+            log.warning("Short notional %.2f exceeds MAX_SHORT_NOTIONAL %.2f", usdt_amount, MAX_SHORT_NOTIONAL)
+            return False
+        if (self._short_notional_open() + usdt_amount) > MAX_SHORT_NOTIONAL:
+            log.warning("Total short notional limit reached — skipping short")
+            return False
+
+        if self._margin_ratio_estimate(price) < MIN_MARGIN_RATIO:
+            log.warning("Margin ratio below MIN_MARGIN_RATIO before short entry")
+            return False
+
+        if config.EXECUTE_LIVE and getattr(self, "exchange", None):
+            if hasattr(self.exchange, "validate_shorting_requirements"):
+                try:
+                    self.exchange.validate_shorting_requirements(short_mode=SHORT_MODE)
+                except Exception as exc:
+                    log.error("Short capability check failed: %s", exc)
+                    return False
+
+        base_amount = usdt_amount / price
+        cover_target = round(price - self.step_size, 4)
+        fee_rate = TAKER_FEE_PCT if is_taker else MAKER_FEE_PCT
+        fees = usdt_amount * fee_rate
+        self.total_fees_paid += fees
+
+        notes = f"short_entry;{('taker' if is_taker else 'maker')}"
+        exchange_order_id = None
+        order_status = None
+
+        if config.EXECUTE_LIVE and getattr(self, "exchange", None):
+            try:
+                if is_taker:
+                    order = self.exchange.create_market_order(SYMBOL, "sell", base_amount)
+                else:
+                    order = self.exchange.create_limit_order(SYMBOL, "sell", price, base_amount)
+                if isinstance(order, dict):
+                    exchange_order_id = order.get("id") or order.get("orderId") or order.get("clientOrderId")
+                    order_status = order.get("status") or order.get("state") or "open"
+                else:
+                    exchange_order_id = str(order)
+                try:
+                    orders_db.insert_order(
+                        getattr(self.exchange, "exchange_id", EXCHANGE_ID),
+                        exchange_order_id or "unknown",
+                        SYMBOL,
+                        "SELL",
+                        price,
+                        base_amount,
+                        status=order_status or "open",
+                        processed=1,
+                    )
+                except Exception as e:
+                    log.warning("Could not insert exchange short order into orders DB: %s", e)
+                notes += f";live_order={exchange_order_id}"
+            except Exception as e:
+                log.error("Live short entry failed: %s", e)
+                notes += ";live_failed"
+
+        self.total_trades += 1
+        self._set_zone_short(zone, price, cover_target, base_amount, usdt_amount)
+
+        trade_id = log_trade(
+            "SELL",
+            price,
+            base_amount,
+            usdt_amount,
+            zone,
+            0,
+            self.portfolio_value(price),
+            price,
+            price,
+            cover_target,
+            fees,
+            notes,
+        )
+        if exchange_order_id and trade_id:
+            try:
+                orders_db.insert_order_trade_mapping(
+                    getattr(self.exchange, "exchange_id", EXCHANGE_ID),
+                    exchange_order_id,
+                    trade_id,
+                    "SELL",
+                    price,
+                    base_amount,
+                    fees,
+                )
+            except Exception as e:
+                log.warning("Could not map short entry order %s: %s", exchange_order_id, e)
+
+        header = "LIVE SHORT OPEN" if config.EXECUTE_LIVE else "PAPER SHORT OPEN"
+        send_telegram(
+            f"🔻 <b>{header}</b>\n"
+            f"Price: ${price:.4f}\n"
+            f"Amount: {base_amount:.2f} XRP (${usdt_amount:.2f})\n"
+            f"Zone: {zone}/{self.num_zones - 1}\n"
+            f"Cover target: ${cover_target:.4f}\n"
+            f"Fee: ${fees:.4f}"
+        )
+        return True
+
+    def close_short(self, price, usdt_amount, zone, force=False):
+        """Close a short position in a zone and realize directional PnL."""
+        if not ALLOW_SHORTS:
+            return False
+        if not self._is_short_zone(zone):
+            log.warning("Zone %s has no short exposure to close", zone)
+            return False
+
+        cover_target = self.zone_sell_target[zone]
+        if not force and price > cover_target:
+            return False
+
+        entry_price = self.zone_buy_price[zone]
+        base_amount = self.zone_position_amount[zone] or (usdt_amount / price)
+        entry_notional = self.zone_entry_notional[zone] or (base_amount * entry_price)
+        cover_notional = base_amount * price
+
+        buy_fee = cover_notional * MAKER_FEE_PCT
+        sell_fee = entry_notional * MAKER_FEE_PCT
+        total_fee = buy_fee + sell_fee
+        self.total_fees_paid += buy_fee
+
+        notes = "short_close"
+        exchange_order_id = None
+        order_status = None
+
+        if config.EXECUTE_LIVE and getattr(self, "exchange", None):
+            try:
+                order = self.exchange.create_limit_order(SYMBOL, "buy", price, base_amount)
+                if isinstance(order, dict):
+                    exchange_order_id = order.get("id") or order.get("orderId") or order.get("clientOrderId")
+                    order_status = order.get("status") or order.get("state") or "open"
+                else:
+                    exchange_order_id = str(order)
+                try:
+                    orders_db.insert_order(
+                        getattr(self.exchange, "exchange_id", EXCHANGE_ID),
+                        exchange_order_id or "unknown",
+                        SYMBOL,
+                        "BUY",
+                        price,
+                        base_amount,
+                        status=order_status or "open",
+                        processed=1,
+                    )
+                except Exception as e:
+                    log.warning("Could not insert exchange short close order into orders DB: %s", e)
+                notes += f";live_order={exchange_order_id}"
+            except Exception as e:
+                log.error("Live short close failed: %s", e)
+                notes += ";live_failed"
+
+        gross_profit = (entry_price - price) * base_amount
+        net_profit = gross_profit - total_fee
+        self.total_profit += net_profit
+        self.total_trades += 1
+
+        trade_id = log_trade(
+            "BUY",
+            price,
+            base_amount,
+            cover_notional,
+            zone,
+            net_profit,
+            self.portfolio_value(price),
+            price,
+            entry_price,
+            cover_target,
+            total_fee,
+            notes,
+        )
+        if exchange_order_id and trade_id:
+            try:
+                orders_db.insert_order_trade_mapping(
+                    getattr(self.exchange, "exchange_id", EXCHANGE_ID),
+                    exchange_order_id,
+                    trade_id,
+                    "BUY",
+                    price,
+                    base_amount,
+                    total_fee,
+                )
+            except Exception as e:
+                log.warning("Could not map short close order %s: %s", exchange_order_id, e)
+
+        self._clear_zone(zone)
+
+        header = "LIVE SHORT CLOSE" if config.EXECUTE_LIVE else "PAPER SHORT CLOSE"
+        send_telegram(
+            f"🔺 <b>{header}</b>\n"
+            f"Price: ${price:.4f}\n"
+            f"Amount: {base_amount:.2f} XRP\n"
+            f"Zone: {zone}/{self.num_zones - 1}\n"
+            f"Entry: ${entry_price:.4f}\n"
+            f"Net Profit: ${net_profit:.4f}\n"
+            f"Forced: {'yes' if force else 'no'}"
+        )
+        return True
+
     def sell(self, price, usdt_amount, zone):
-        if not self.zone_holding[zone]:
+        if not self._is_long_zone(zone):
             log.warning(f"Zone {zone} not holding — skipping phantom sell")
             return False
 
@@ -862,7 +1212,7 @@ class PaperTrader:
                      f"below sell target ${sell_target:.4f} — holding")
             return False
 
-        xrp_amount = usdt_amount / price
+        xrp_amount = self.zone_position_amount[zone] or (usdt_amount / price)
         if self.xrp_balance < xrp_amount:
             log.warning("Insufficient XRP — skipping")
             return False
@@ -870,8 +1220,10 @@ class PaperTrader:
         is_catchup = self.zone_is_catchup[zone]
 
         # NEW: Calculate fees and net profit
-        buy_fee = self.order_size * MAKER_FEE_PCT
-        sell_fee = usdt_amount * MAKER_FEE_PCT
+        entry_notional = self.zone_entry_notional[zone] or (xrp_amount * buy_price)
+        sell_notional = xrp_amount * price
+        buy_fee = entry_notional * MAKER_FEE_PCT
+        sell_fee = sell_notional * MAKER_FEE_PCT
         total_fee = buy_fee + sell_fee
         self.total_fees_paid += sell_fee  # Buy fee already counted
 
@@ -904,7 +1256,7 @@ class PaperTrader:
 
         # Update balances / finalize in-memory state
         self.xrp_balance           -= xrp_amount
-        self.usdt_balance          += usdt_amount
+        self.usdt_balance          += sell_notional
         self.total_trades          += 1
 
         # Net profit after all fees
@@ -912,20 +1264,17 @@ class PaperTrader:
         net_profit = gross_profit - total_fee
         self.total_profit          += net_profit
 
-        self.zone_holding[zone]     = False
-        self.zone_buy_price[zone]   = 0.0
-        self.zone_sell_target[zone] = 0.0
-        self.zone_is_catchup[zone]  = False
+        self._clear_zone(zone)
 
         if exchange_order_id:
             with orders_db.transaction() as tx_conn:
-                trade_id = log_trade("SELL", price, xrp_amount, usdt_amount, zone, net_profit,
+                trade_id = log_trade("SELL", price, xrp_amount, sell_notional, zone, net_profit,
                           self.portfolio_value(price), price, buy_price, sell_target,
                           total_fee, notes, conn=tx_conn, commit=False)
                 orders_db.insert_order_trade_mapping(getattr(self.exchange, 'exchange_id', EXCHANGE_ID),
                                                      exchange_order_id, trade_id, 'SELL', price, xrp_amount, total_fee, conn=tx_conn, commit=False)
         else:
-            trade_id = log_trade("SELL", price, xrp_amount, usdt_amount, zone, net_profit,
+            trade_id = log_trade("SELL", price, xrp_amount, sell_notional, zone, net_profit,
                   self.portfolio_value(price), price, buy_price, sell_target,
                   total_fee, notes)
 
@@ -937,7 +1286,7 @@ class PaperTrader:
         send_telegram(
             f"🔴 <b>{header}</b>\n"
             f"Price: ${price:.4f}\n"
-            f"Amount: {xrp_amount:.2f} XRP (${usdt_amount:.2f})\n"
+            f"Amount: {xrp_amount:.2f} XRP (${sell_notional:.2f})\n"
             f"Zone: {zone}/{self.num_zones - 1}\n"
             f"Bought at: ${buy_price:.4f}\n"
             f"Sell target was: ${sell_target:.4f}\n"
@@ -951,7 +1300,7 @@ class PaperTrader:
                  f"Net Profit: ${net_profit:.4f} | Fees: ${total_fee:.4f} | Catch-up: {is_catchup} | notes: {notes}")
         return True
 
-    def check_grid(self, current_price, last_price, exchange):
+    def check_grid(self, current_price, last_price, exchange):  # noqa: C901
         # Catch-up sells first — handle any missed sells
         self.check_missed_sells(current_price)
 
@@ -968,14 +1317,24 @@ class PaperTrader:
 
             # Price dropped into zone from above = BUY
             if last_price >= upper and current_price < upper:
-                if not self.zone_holding[i]:
+                if self._is_flat_zone(i):
                     # Use dynamic size, maker order (limit)
                     self.buy(current_price, dynamic_size, i, is_taker=False)
 
             # Price reached sell target for this zone = SELL
-            if self.zone_holding[i]:
+            if self._is_long_zone(i):
                 if current_price >= self.zone_sell_target[i]:
                     self.sell(current_price, dynamic_size, i)
+
+            # Price rose into zone from below = SHORT entry (when enabled)
+            if ALLOW_SHORTS and last_price <= self.grid_levels[i] and current_price > self.grid_levels[i]:
+                if self._is_flat_zone(i):
+                    self.open_short(current_price, dynamic_size, i, is_taker=False)
+
+            # Price returned to short cover target = close short
+            if self._is_short_zone(i):
+                if current_price <= self.zone_sell_target[i]:
+                    self.close_short(current_price, dynamic_size, i)
 
     def portfolio_value(self, current_price):
         return self.usdt_balance + (self.xrp_balance * current_price)
@@ -983,7 +1342,8 @@ class PaperTrader:
     def status_report(self, current_price):
         pnl     = self.portfolio_value(current_price) - self.start_balance
         pnl_pct = (pnl / self.start_balance) * 100
-        holding_zones   = [i for i, s in enumerate(self.zone_holding) if s]
+        holding_zones = [i for i, exposure in enumerate(self.zone_exposure) if exposure > 0]
+        short_zones = [i for i, exposure in enumerate(self.zone_exposure) if exposure < 0]
         holding_details = ""
         for z in holding_zones:
             target  = self.zone_sell_target[z]
@@ -1015,7 +1375,8 @@ class PaperTrader:
             f"Net Profit: ${self.total_profit:.4f}\n"
             f"Total Fees Paid: ${self.total_fees_paid:.4f}\n"
             f"Catch-up Profit: ${catchup['total_profit']}\n"
-            f"Open Zones: {len(holding_zones)}"
+            f"Open Long Zones: {len(holding_zones)}\n"
+            f"Open Short Zones: {len(short_zones)}"
             f"{holding_details}"
             f"{pending_str}"
         )

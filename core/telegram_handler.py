@@ -163,6 +163,9 @@ def _dispatch_command(text, trader, exchange):
         "/trades": _cmd_trades,
         "/status": lambda: _cmd_status(trader, exchange),
         "/grid": lambda: _cmd_grid(trader),
+        "/positions": lambda: _cmd_positions(trader, exchange),
+        "/risk": lambda: _cmd_risk(trader, exchange),
+        "/close-shorts": lambda: _cmd_close_shorts(trader, exchange),
         "/agent": lambda: _cmd_agent(trader, exchange),
         "/apply": lambda: _cmd_apply(trader),
         "/reject": _cmd_reject,
@@ -182,6 +185,8 @@ def _cmd_help():
         "/metrics — runtime health counters\n"
         "/trades — last 5 trades\n"
         "/grid — grid levels and zone states\n\n"
+        "/positions — long/short exposure snapshot\n"
+        "/risk — short risk limits and margin estimate\n\n"
         "<b>Control:</b>\n"
         "/agent — trigger manual agent analysis\n"
         "/testmode on — enable test mode\n"
@@ -189,6 +194,7 @@ def _cmd_help():
         "/testmode off — disable test mode\n"
         "/live status — show execution mode\n"
         "/live arm — arm live toggle, then reply ON or OFF\n"
+        "/close-shorts — emergency close all short zones\n"
         "/apply — apply pending agent changes now\n"
         "/reject — reject pending agent changes\n"
         "/stop — safely stop the bot\n\n"
@@ -225,6 +231,69 @@ def _cmd_status(trader, exchange):
         send_telegram(trader.status_report(current_price))
     except Exception as e:
         send_telegram(f"⚠️ Could not fetch price: {e}")
+
+
+def _safe_price(exchange):
+    try:
+        if exchange and hasattr(exchange, "fetch_ticker"):
+            ticker = exchange.fetch_ticker(config.SYMBOL)
+            if isinstance(ticker, dict) and ticker.get("last") is not None:
+                return float(ticker["last"])
+    except Exception:
+        pass
+    try:
+        return float(get_price(exchange))
+    except Exception:
+        return 0.0
+
+
+def _cmd_positions(trader, exchange):
+    current_price = _safe_price(exchange)
+    if not hasattr(trader, "get_positions_snapshot"):
+        send_telegram("ℹ️ Position snapshot is not available in this runtime.")
+        return
+    snap = trader.get_positions_snapshot(current_price)
+    send_telegram(
+        "📌 <b>Positions</b>\n"
+        f"Price: ${current_price:.4f}\n"
+        f"Long zones: {len(snap['long_zones'])} {snap['long_zones']}\n"
+        f"Short zones: {len(snap['short_zones'])} {snap['short_zones']}\n"
+        f"Flat zones: {snap['flat_zones']}\n"
+        f"Open short notional: ${snap['short_notional_open']:.2f}\n"
+        f"Margin ratio est: {snap['margin_ratio_estimate']:.3f}"
+    )
+
+
+def _cmd_risk(trader, exchange):
+    current_price = _safe_price(exchange)
+    if not hasattr(trader, "get_risk_snapshot"):
+        send_telegram("ℹ️ Risk snapshot is not available in this runtime.")
+        return
+    risk = trader.get_risk_snapshot(current_price)
+    send_telegram(
+        "🧯 <b>Risk Snapshot</b>\n"
+        f"ALLOW_SHORTS: {'ON' if risk['allow_shorts'] else 'OFF'}\n"
+        f"SHORT_MODE: {risk['short_mode']}\n"
+        f"Short zones: {risk['short_count']}/{risk['short_count_limit']} ({'OK' if risk['short_count_ok'] else 'LIMIT'})\n"
+        f"Short notional: ${risk['short_notional']:.2f}/${risk['short_notional_limit']:.2f} ({'OK' if risk['short_notional_ok'] else 'LIMIT'})\n"
+        f"Margin ratio: {risk['margin_ratio']:.3f} (min {risk['min_margin_ratio']:.3f}) ({'OK' if risk['margin_ratio_ok'] else 'ALERT'})"
+    )
+
+
+def _cmd_close_shorts(trader, exchange):
+    current_price = _safe_price(exchange)
+    if not hasattr(trader, "emergency_close_shorts"):
+        send_telegram("⚠️ Emergency short close is not available in this runtime.")
+        return
+    closed = trader.emergency_close_shorts(
+        current_price,
+        reason="telegram /close-shorts",
+    )
+    send_telegram(
+        "🛑 <b>Close Shorts</b>\n"
+        f"Price: ${current_price:.4f}\n"
+        f"Closed zones: {closed}"
+    )
 
 def _cmd_summary():
     try:

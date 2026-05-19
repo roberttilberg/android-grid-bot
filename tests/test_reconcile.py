@@ -163,3 +163,66 @@ def test_reconcile_partial_fill(app):
     assert int(processed2) == 1
 
     conn.close()
+
+
+def test_reconcile_short_close_fill(app):
+    db, grid = app
+
+    db.insert_order("phemex", "short-close-1", "XRP/USDT", "BUY", 1.30, 2.0, status="open", processed=0)
+
+    class ShortCloseAdapter:
+        def __init__(self):
+            self.exchange_id = "phemex"
+
+        def fetch_open_orders(self, symbol):
+            return []
+
+        def fetch_order(self, order_id, symbol=None):
+            if order_id != "short-close-1":
+                return None
+            return {
+                "id": "short-close-1",
+                "symbol": "XRP/USDT",
+                "side": "BUY",
+                "price": 1.30,
+                "amount": 2.0,
+                "filled": 2.0,
+                "status": "closed",
+                "fee": {"cost": 0.001},
+            }
+
+        def fetch_ticker(self, symbol):
+            return {"last": 1.31}
+
+    trader = grid.PaperTrader(
+        grid.PAPER_BALANCE,
+        grid.calculate_grid_levels(grid.GRID_LOWER, grid.GRID_UPPER, grid.GRID_LEVELS),
+    )
+    # Seed an existing short position in zone 0: entry 1.35, cover target 1.30.
+    trader._set_zone_short(0, 1.35, 1.30, base_amount=2.0, entry_notional=2.7)
+
+    grid.reconcile_once(
+        adapter=ShortCloseAdapter(),
+        symbol="XRP/USDT",
+        exchange_id="phemex",
+        trader=trader,
+    )
+
+    conn = sqlite3.connect(db.DB_PATH)
+    c = conn.cursor()
+    c.execute(
+        "SELECT exchange_order_id, filled, status, processed FROM orders WHERE exchange_order_id=?",
+        ("short-close-1",),
+    )
+    row = c.fetchone()
+    assert row is not None
+    assert float(row[1]) == pytest.approx(2.0)
+    assert int(row[3]) == 1
+
+    c.execute("SELECT side, notes FROM trades ORDER BY id DESC LIMIT 1")
+    side, notes = c.fetchone()
+    assert side == "BUY"
+    assert "reconciled_short_close" in (notes or "")
+
+    assert trader.zone_exposure[0] == 0
+    conn.close()
