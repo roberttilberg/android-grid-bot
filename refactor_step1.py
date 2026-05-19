@@ -1,5 +1,5 @@
 
-bot_file = "andriod_grid_bot_v1.py"
+bot_file = "android_grid_bot_v1.py"
 with open(bot_file, "r", encoding="utf-8") as f:
     code = f.read()
 
@@ -29,6 +29,6 @@ with open("core/config.py", "w", encoding="utf-8") as f:
 
 print("Created core/config.py")
 
-# Now we need to modify andriod_grid_bot_v1.py to import core.config
+# Now we need to modify android_grid_bot_v1.py to import core.config
 # and replace global variable usages.
 # This is complex to do with regex alone.

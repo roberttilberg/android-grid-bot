@@ -1,10 +1,12 @@
 import ast
 
-source_file = "andriod_grid_bot_v1.py"
+# ruff: noqa: E402,E501
+
+source_file = "android_grid_bot_v1.py"
 import os
 
 # We will read from the git checkout of the original file
-os.system("git show HEAD:andriod_grid_bot_v1.py > original_bot.py")
+os.system("git show HEAD:android_grid_bot_v1.py > original_bot.py")
 
 with open("original_bot.py", "r", encoding="utf-8") as f:
     code = f.read()

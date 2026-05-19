@@ -52,7 +52,7 @@ db.ensure_orders_table()
 os.chdir(tmpdir)
 
 # Import the bot module
-grid = importlib.import_module('andriod_grid_bot_v1')
+grid = importlib.import_module('android_grid_bot_v1')
 
 # Initialize bot DB structures (creates trades table etc.)
 grid.init_db()

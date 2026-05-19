@@ -38,7 +38,7 @@ def app(tmp_path, monkeypatch):
         pass
     db.ensure_orders_table()
 
-    grid = importlib.import_module("andriod_grid_bot_v1")
+    grid = importlib.import_module("android_grid_bot_v1")
     grid.init_db()
 
     yield db, grid

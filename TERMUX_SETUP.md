@@ -98,7 +98,7 @@ The bot now exposes runtime metrics and structured events:
 
 - Telegram command: `/metrics`
 - Main log file: `~/grid_bot.log`
-- Single-instance lock file: `~/andriod_grid_bot_v1.lock`
+- Single-instance lock file: `~/android_grid_bot_v1.lock`
 - Structured event entries are JSON objects embedded in log lines.
 
 Useful checks:

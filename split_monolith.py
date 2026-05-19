@@ -1,6 +1,8 @@
 import ast
 
-source_file = "andriod_grid_bot_v1.py"
+# ruff: noqa: E501
+
+source_file = "android_grid_bot_v1.py"
 
 with open(source_file, "r", encoding="utf-8") as f:
     code = f.read()

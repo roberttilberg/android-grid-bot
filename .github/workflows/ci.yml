@@ -48,7 +48,7 @@ jobs:
 
       - name: Byte-compile critical modules
         run: |
-          python -m py_compile andriod_grid_bot_v1.py db.py tests/test_reconcile.py tools/sim_reconcile_demo.py
+          python -m py_compile android_grid_bot_v1.py db.py tests/test_reconcile.py tools/sim_reconcile_demo.py
 
       - name: Run tests
         run: |

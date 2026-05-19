@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Safe launcher for andriod_grid_bot_v1.py.
+"""Safe launcher for android_grid_bot_v1.py.
 
 Checks the single-instance lock file before starting the bot and provides
 clear terminal feedback for Termux sessions.
