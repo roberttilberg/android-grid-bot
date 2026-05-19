@@ -1,13 +1,13 @@
 """exchange_adapter.py
-Simple synchronous CCXT adapter with retry/backoff helpers.
+Synchronous CCXT adapter with retry/backoff helpers.
 Keep calls centralized so grid logic can call a single adapter and
 benefit from common retry/error handling appropriate for Termux devices.
 """
-import asyncio
 import logging
+import time
 from functools import wraps
 
-import ccxt.pro as ccxt
+import ccxt
 
 log = logging.getLogger("gridbot.exchange")
 
@@ -15,11 +15,11 @@ log = logging.getLogger("gridbot.exchange")
 def retry(max_attempts=5, base_delay=0.5):
     def deco(f):
         @wraps(f)
-        async def wrapper(*args, **kwargs):
+        def wrapper(*args, **kwargs):
             attempt = 0
             while True:
                 try:
-                    return await f(*args, **kwargs)
+                    return f(*args, **kwargs)
                 except ccxt.AuthenticationError:
                     # Authentication errors (e.g. IP not whitelisted) are permanent;
                     # retrying will not help.
@@ -39,7 +39,7 @@ def retry(max_attempts=5, base_delay=0.5):
                         e,
                         delay,
                     )
-                    await asyncio.sleep(delay)
+                    time.sleep(delay)
         return wrapper
     return deco
 
@@ -51,6 +51,7 @@ class ExchangeAdapter:
         api_key=None,
         secret=None,
         enable_rate_limit=True,
+        testnet=False,
         options=None,
     ):
         cfg = {"enableRateLimit": enable_rate_limit}
@@ -61,6 +62,8 @@ class ExchangeAdapter:
 
         try:
             self.exchange = getattr(ccxt, exchange_id)(cfg)
+            if testnet and hasattr(self.exchange, "set_sandbox_mode"):
+                self.exchange.set_sandbox_mode(True)
             # load markets lazily but attempt once to validate keys
             try:
                 self.exchange.load_markets()
@@ -73,54 +76,58 @@ class ExchangeAdapter:
         except AttributeError as exc:
             raise ValueError(f"Unknown exchange id: {exchange_id}") from exc
         self.exchange_id = exchange_id
+        self.testnet = bool(testnet)
 
     @retry()
-    async def fetch_ticker(self, symbol):
-        return await self.exchange.fetch_ticker(symbol)
+    def fetch_ticker(self, symbol):
+        return self.exchange.fetch_ticker(symbol)
 
     @retry()
-    async def fetch_ohlcv(self, symbol, timeframe="1h", limit=500):
+    def fetch_ohlcv(self, symbol, timeframe="1h", limit=500):
         # Phemex OHLCV can reject settle-suffixed symbols like XRP/USDT:USDT.
         # Try normalized symbol first, then fallback to original.
         if self.exchange_id == "phemex" and ":" in str(symbol):
             normalized = str(symbol).split(":", 1)[0]
             try:
-                return await self.exchange.fetch_ohlcv(
+                return self.exchange.fetch_ohlcv(
                     normalized,
                     timeframe=timeframe,
                     limit=limit,
                 )
             except Exception as first_error:
                 log.warning(
-                    "Phemex OHLCV failed for normalized symbol %s; retrying original %s: %s",
+                    (
+                        "Phemex OHLCV failed for normalized symbol %s; "
+                        "retrying original %s: %s"
+                    ),
                     normalized,
                     symbol,
                     first_error,
                 )
-        return await self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+        return self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
 
     @retry()
-    async def create_limit_order(self, symbol, side, price, amount):
-        return await self.exchange.create_order(symbol, "limit", side, amount, price)
+    def create_limit_order(self, symbol, side, price, amount):
+        return self.exchange.create_order(symbol, "limit", side, amount, price)
 
     @retry()
-    async def create_market_order(self, symbol, side, amount):
-        return await self.exchange.create_order(symbol, "market", side, amount)
+    def create_market_order(self, symbol, side, amount):
+        return self.exchange.create_order(symbol, "market", side, amount)
 
     @retry()
-    async def cancel_order(self, order_id, symbol=None):
+    def cancel_order(self, order_id, symbol=None):
         if symbol:
-            return await self.exchange.cancel_order(order_id, symbol)
-        return await self.exchange.cancel_order(order_id)
+            return self.exchange.cancel_order(order_id, symbol)
+        return self.exchange.cancel_order(order_id)
 
     @retry()
-    async def fetch_order(self, order_id, symbol=None):
+    def fetch_order(self, order_id, symbol=None):
         if symbol:
-            return await self.exchange.fetch_order(order_id, symbol)
-        return await self.exchange.fetch_order(order_id)
+            return self.exchange.fetch_order(order_id, symbol)
+        return self.exchange.fetch_order(order_id)
 
     @retry()
-    async def fetch_open_orders(self, symbol=None):
+    def fetch_open_orders(self, symbol=None):
         if symbol:
-            return await self.exchange.fetch_open_orders(symbol)
-        return await self.exchange.fetch_open_orders()
+            return self.exchange.fetch_open_orders(symbol)
+        return self.exchange.fetch_open_orders()

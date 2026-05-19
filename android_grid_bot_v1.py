@@ -25,20 +25,33 @@ import logging
 import os
 import random
 import sqlite3
+import sys
 import threading
-import time
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 
 import db as orders_db
-from core.agent import run_agent
+from core.agent import apply_pending_changes, run_agent
 from core.config import *
-from core.telegram_handler import send_telegram, telegram_listener
-from core.trading import PaperTrader, reconcile_worker
+from core.telegram_handler import flush_telegram_queue, send_telegram, telegram_listener
+from core.trading import (
+    PaperTrader,
+    find_oldest_open_buy_price,
+    get_open_trades_from_db,
+    normalize_remote_order,
+    reconcile_once,
+    reconcile_worker,
+)
+from exchange_adapter import ExchangeAdapter
 
 # ============================================================
 
-SYMBOL           = "XRP/USDT:USDT"
+# Ensure imports of `android_grid_bot_v1` resolve to this process module even
+# when launched as a script (`__main__`), avoiding duplicate module execution.
+if __name__ == "__main__":
+    sys.modules.setdefault("android_grid_bot_v1", sys.modules[__name__])
+
+SYMBOL           = os.getenv("SYMBOL", SYMBOL)
 PAPER_BALANCE    = 100.0
 GRID_LOWER       = 1.25
 GRID_UPPER       = 1.45
@@ -114,17 +127,21 @@ RECONCILE_INTERVAL_SECONDS = int(os.getenv("RECONCILE_INTERVAL_SECONDS", "300"))
 log = logging.getLogger("gridbot")
 log.setLevel(logging.INFO)
 
-rotating_handler = RotatingFileHandler(
-    LOG_FILE, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT)
-rotating_handler.setFormatter(
-    logging.Formatter("%(asctime)s [%(levelname)s] [pid=%(process)d] %(message)s"))
+if not log.handlers:
+    rotating_handler = RotatingFileHandler(
+        LOG_FILE, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT
+    )
+    rotating_handler.setFormatter(
+        logging.Formatter("%(asctime)s [%(levelname)s] [pid=%(process)d] %(message)s")
+    )
 
-console_handler = logging.StreamHandler()
-console_handler.setFormatter(
-    logging.Formatter("%(asctime)s [%(levelname)s] [pid=%(process)d] %(message)s"))
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(
+        logging.Formatter("%(asctime)s [%(levelname)s] [pid=%(process)d] %(message)s")
+    )
 
-log.addHandler(rotating_handler)
-log.addHandler(console_handler)
+    log.addHandler(rotating_handler)
+    log.addHandler(console_handler)
 
 # Global flags
 stop_flag       = threading.Event()
@@ -658,6 +675,31 @@ def get_current_zone(price, grid_levels):
     return len(grid_levels) - 2
 
 
+def get_exchange():
+    """Build a synchronous exchange adapter for trading + reconciliation."""
+    options = None
+    if EXCHANGE_ID == "phemex":
+        options = {"defaultType": "swap"}
+    elif EXCHANGE_ID == "binance" and EXCHANGE_MARKET_TYPE in {"future", "swap", "futures"}:
+        options = {"defaultType": "future"}
+
+    return ExchangeAdapter(
+        exchange_id=EXCHANGE_ID,
+        api_key=API_KEY,
+        secret=API_SECRET,
+        enable_rate_limit=True,
+        testnet=EXCHANGE_TESTNET,
+        options=options,
+    )
+
+
+def get_price(exchange):
+    if TEST_MODE_ENABLED:
+        return get_simulated_price()
+    ticker = exchange.fetch_ticker(SYMBOL)
+    return ticker["last"]
+
+
 # ============================================================
 # MAIN BOT LOOP
 # ============================================================
@@ -711,7 +753,7 @@ async def _pause_if_outside_grid(current_price):
             f"XRP: ${current_price:.4f} | Floor: ${GRID_LOWER}\n"
             "Bot paused."
         )
-        time.sleep(CHECK_INTERVAL)
+        await asyncio.sleep(CHECK_INTERVAL)
         return True
     if current_price > GRID_UPPER:
         send_telegram(
@@ -719,7 +761,7 @@ async def _pause_if_outside_grid(current_price):
             f"XRP: ${current_price:.4f} | Ceiling: ${GRID_UPPER}\n"
             "Bot paused."
         )
-        time.sleep(CHECK_INTERVAL)
+        await asyncio.sleep(CHECK_INTERVAL)
         return True
     return False
 
@@ -757,7 +799,7 @@ async def _run_bot_iteration(
     last_agent_run,
 ):
     _metrics_inc("bot.iterations")
-    current_price = await get_price(exchange)
+    current_price = get_price(exchange)
     log.info("Price: $%.4f", current_price)
 
     if not trader.safety_check(current_price):
@@ -769,7 +811,7 @@ async def _run_bot_iteration(
     if is_paused:
         return last_price, status_counter, last_agent_run, False
 
-    await trader.check_grid(current_price, last_price, exchange)
+    trader.check_grid(current_price, last_price, exchange)
     status_counter = _maybe_send_hourly_status(
         trader, current_price, status_counter, checks_per_hour
     )
@@ -844,7 +886,7 @@ async def run_bot():
         trader.exchange = None
 
     log.info("Starting balance: $%s USDT", PAPER_BALANCE)
-    starting_price = await get_price(exchange)
+    starting_price = get_price(exchange)
     trend = 'SIDEWAYS' # detect_trend is blocking, maybe keep sideways or await
     log.info("Starting trend detection: %s", trend)
 

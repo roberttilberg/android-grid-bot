@@ -4,11 +4,11 @@ from datetime import datetime
 
 import core.config as config
 import db as orders_db
+from core.analytics import get_catchup_stats
 from core.config import (
     AGENT_INTERVAL_HOURS,
     AUTO_REBALANCE_ENABLED,
     EXCHANGE_ID,
-    EXECUTE_LIVE,
     GRID_LEVELS,
     GRID_LOWER,
     GRID_REBALANCE_THRESHOLD,
@@ -27,15 +27,14 @@ from core.config import (
     TREND_BIAS_ENABLED,
     TREND_THRESHOLD,
     UNDERWATER_ALERT_THRESHOLD,
-    VOLATILITY_ADJUSTMENT,
-    VOLATILITY_LOOKBACK,
     VOL_THRESHOLD_HIGH,
     VOL_THRESHOLD_LOW,
+    VOLATILITY_ADJUSTMENT,
+    VOLATILITY_LOOKBACK,
     pending_changes,
     pending_lock,
     stop_flag,
 )
-from core.analytics import get_catchup_stats
 from core.telegram_handler import send_telegram
 from db import complete_catchup_trade, get_open_trades_from_db, log_catchup_trade
 
@@ -73,7 +72,7 @@ def get_runtime_mode_label():
     """Return a human-readable label for the current runtime mode."""
     if TEST_MODE_ENABLED:
         return "TEST MODE"
-    return "LIVE" if EXECUTE_LIVE else "Paper Trading"
+    return "LIVE" if config.EXECUTE_LIVE else "Paper Trading"
 
 def find_oldest_open_buy_price(zone):
     """Look up the oldest unmatched BUY price for a zone from the DB."""
@@ -95,7 +94,7 @@ def normalize_remote_order(remote):
         return {}
     return {
         "id": remote.get("id") or remote.get("orderId"),
-        "side": (remote.get("side") or "").upper(),
+            f"Mode: {'LIVE' if config.EXECUTE_LIVE else 'Paper Trading'}\n"
         "price": remote.get("price") or remote.get("avgPrice") or 0,
         "filled": remote.get("filled") or remote.get("executedQty") or 0,
         "amount": remote.get("amount") or remote.get("origQty") or 0,
@@ -175,9 +174,27 @@ def _reconcile_build_adapter(adapter, exchange_id):
     if adapter is not None:
         return adapter
     try:
+        from core.config import (
+            API_KEY,
+            API_SECRET,
+            EXCHANGE_MARKET_TYPE,
+            EXCHANGE_TESTNET,
+        )
         from exchange_adapter import ExchangeAdapter
-        from core.config import API_KEY, API_SECRET
-        return ExchangeAdapter(exchange_id, API_KEY, API_SECRET)
+
+        options = None
+        if exchange_id == "phemex":
+            options = {"defaultType": "swap"}
+        elif exchange_id == "binance" and EXCHANGE_MARKET_TYPE in {"future", "swap", "futures"}:
+            options = {"defaultType": "future"}
+
+        return ExchangeAdapter(
+            exchange_id,
+            API_KEY,
+            API_SECRET,
+            testnet=EXCHANGE_TESTNET,
+            options=options,
+        )
     except Exception as e:
         log.warning("Could not build reconcile adapter: %s", e)
         return None
@@ -243,7 +260,10 @@ def _reconcile_process_unprocessed(adapter, unproc, local_exchange_id, trader):
                 adapter, row, local_exchange_id, trader
             )
         except Exception as e:
-            exch_id = row.get("exchange_order_id", "unknown")
+            try:
+                exch_id = row["exchange_order_id"]
+            except Exception:
+                exch_id = "unknown"
             log.error(
                 "Reconciliation: failed to log trade for %s: %s", exch_id, e
             )
@@ -462,7 +482,7 @@ class PaperTrader:
         send_telegram(
             f"🤖 <b>Grid Bot + Agent Started</b>\n"
             f"Pair: {SYMBOL}\n"
-            f"Mode: {'LIVE' if EXECUTE_LIVE else 'Paper Trading'}\n"
+            f"Mode: {'LIVE' if config.EXECUTE_LIVE else 'Paper Trading'}\n"
             f"Runtime Mode: {get_runtime_mode_label()}\n"
             f"Balance: ${PAPER_BALANCE} USDT\n"
             f"Grid: ${GRID_LOWER} - ${GRID_UPPER}\n"
@@ -766,7 +786,7 @@ class PaperTrader:
         order_status = None
 
         # Attempt live order placement when enabled and adapter attached
-        if EXECUTE_LIVE and getattr(self, 'exchange', None):
+        if config.EXECUTE_LIVE and getattr(self, 'exchange', None):
             try:
                 if is_taker:
                     order = self.exchange.create_market_order(SYMBOL, 'buy', xrp_amount)
@@ -812,7 +832,7 @@ class PaperTrader:
                       self.portfolio_value(price), price, price, sell_target,
                       fees, notes)
 
-        header = "LIVE BUY" if EXECUTE_LIVE else "PAPER BUY"
+        header = "LIVE BUY" if config.EXECUTE_LIVE else "PAPER BUY"
         send_telegram(
             f"🟢 <b>{header}</b>\n"
             f"Price: ${price:.4f}\n"
@@ -860,7 +880,7 @@ class PaperTrader:
         order_status = None
 
         # Attempt live order placement if enabled
-        if EXECUTE_LIVE and getattr(self, 'exchange', None):
+        if config.EXECUTE_LIVE and getattr(self, 'exchange', None):
             try:
                 # Use a limit sell at the target price to try and get maker fee
                 order = self.exchange.create_limit_order(SYMBOL, 'sell', price, xrp_amount)
@@ -913,7 +933,7 @@ class PaperTrader:
             complete_catchup_trade(zone, price, net_profit)
 
         tag = "🔄 CATCH-UP " if is_catchup else ""
-        header = f"LIVE SELL {tag}" if EXECUTE_LIVE else f"PAPER SELL {tag}"
+        header = f"LIVE SELL {tag}" if config.EXECUTE_LIVE else f"PAPER SELL {tag}"
         send_telegram(
             f"🔴 <b>{header}</b>\n"
             f"Price: ${price:.4f}\n"

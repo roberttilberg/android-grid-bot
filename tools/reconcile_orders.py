@@ -48,6 +48,17 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--exchange", default="binance", help="Exchange id (ccxt)")
     parser.add_argument(
+        "--testnet",
+        action="store_true",
+        help="Use exchange sandbox/testnet mode when supported.",
+    )
+    parser.add_argument(
+        "--market-type",
+        default="spot",
+        choices=["spot", "future", "futures", "swap"],
+        help="Market type hint for exchanges that require defaultType.",
+    )
+    parser.add_argument(
         "--symbol",
         default=None,
         help="Optional symbol to limit open order fetch",
@@ -55,7 +66,22 @@ def main():
     args = parser.parse_args()
 
     api_key, api_secret = get_env_creds(args.exchange)
-    adapter = ExchangeAdapter(args.exchange, api_key=api_key, secret=api_secret)
+    options = None
+    if args.exchange == "phemex":
+        options = {"defaultType": "swap"}
+    elif (
+        args.exchange == "binance"
+        and args.market_type in {"future", "futures", "swap"}
+    ):
+        options = {"defaultType": "future"}
+
+    adapter = ExchangeAdapter(
+        args.exchange,
+        api_key=api_key,
+        secret=api_secret,
+        testnet=args.testnet,
+        options=options,
+    )
 
     db.ensure_orders_table()
 

@@ -3,13 +3,13 @@ import logging
 import os
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import requests
 
 import core.config as config
 import db as orders_db
-from core.agent import queue_simulated_agent_change, run_agent
+from core.agent import apply_pending_changes, queue_simulated_agent_change, run_agent
 from core.analytics import (
     _analytics_best_hours_block,
     _analytics_catchup_block,
@@ -30,6 +30,8 @@ TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 log = logging.getLogger('gridbot.telegram')
 CMD_COOLDOWN_SECS = 5
+LIVE_ARM_WINDOW_SECS = 45
+_live_arm_expires_at = None
 
 def _metrics_inc(*args): pass  # Placeholder for now
 def _emit_event(*args, **kwargs): pass  # Placeholder for now
@@ -116,7 +118,15 @@ async def telegram_listener(trader, exchange, start_offset):
                 config.last_command_time = now
 
                 text = message.get("text", "").strip().lower()
+
+                if _handle_live_arm_reply(text):
+                    continue
+
                 log.info("Command received: %s", text)
+
+                if not text.startswith("/"):
+                    continue
+
                 should_stop = _dispatch_command(text, trader, exchange)
                 if should_stop:
                     break
@@ -141,6 +151,8 @@ def _dispatch_command(text, trader, exchange):
         return True
     if text.startswith("/testmode"):
         _cmd_testmode(text, trader, exchange)
+    if text.startswith("/live"):
+        _cmd_live(text)
 
     handlers = {
         "/help": _cmd_help,
@@ -175,6 +187,8 @@ def _cmd_help():
         "/testmode on — enable test mode\n"
         "/testmode run — run one test simulation now\n"
         "/testmode off — disable test mode\n"
+        "/live status — show execution mode\n"
+        "/live arm — arm live toggle, then reply ON or OFF\n"
         "/apply — apply pending agent changes now\n"
         "/reject — reject pending agent changes\n"
         "/stop — safely stop the bot\n\n"
@@ -365,6 +379,76 @@ def _cmd_testmode(text, trader, exchange):
         log.info("Test mode disabled by user")
     else:
         send_telegram("ℹ️ Usage:\n/testmode on\n/testmode run\n/testmode off")
+
+
+def _cmd_live(text):
+    """Toggle runtime order execution mode without restarting the bot."""
+    global _live_arm_expires_at
+
+    if text == "/live status":
+        send_telegram(
+            "⚙️ <b>Execution Mode</b>\n"
+            f"EXECUTE_LIVE: {'ON' if config.EXECUTE_LIVE else 'OFF'}\n"
+            f"Exchange: {config.EXCHANGE_ID}\n"
+            f"Testnet: {'ON' if config.EXCHANGE_TESTNET else 'OFF'}"
+        )
+        return
+
+    if text == "/live arm":
+        _live_arm_expires_at = datetime.now() + timedelta(seconds=LIVE_ARM_WINDOW_SECS)
+        send_telegram(
+            "🛡️ <b>Live toggle armed</b>\n"
+            f"Reply with <b>ON</b> or <b>OFF</b> within {LIVE_ARM_WINDOW_SECS}s.\n"
+            "Direct /live on and /live off are disabled."
+        )
+        log.warning("Runtime EXECUTE_LIVE arm enabled by Telegram command")
+        return
+
+    send_telegram("ℹ️ Usage:\n/live status\n/live arm")
+
+
+def _handle_live_arm_reply(text):
+    """Handle ON/OFF replies after /live arm. Returns True if consumed."""
+    global _live_arm_expires_at
+
+    if _live_arm_expires_at is None:
+        return False
+
+    if datetime.now() > _live_arm_expires_at:
+        _live_arm_expires_at = None
+        send_telegram("⌛ Live toggle arm expired. Send /live arm again.")
+        return False
+
+    if text in {"on", "off"}:
+        desired_live = text == "on"
+        if desired_live and not config.EXCHANGE_TESTNET:
+            send_telegram(
+                "⚠️ Refusing ON because EXCHANGE_TESTNET is OFF.\n"
+                "Set EXCHANGE_TESTNET=true before enabling live execution."
+            )
+            _live_arm_expires_at = None
+            return True
+
+        config.EXECUTE_LIVE = desired_live
+        _live_arm_expires_at = None
+        mode_label = "ON" if config.EXECUTE_LIVE else "OFF"
+        send_telegram(
+            "✅ <b>Live toggle applied</b>\n"
+            f"EXECUTE_LIVE: <b>{mode_label}</b>"
+        )
+        log.warning("Runtime EXECUTE_LIVE set by armed Telegram reply: %s", mode_label)
+        return True
+
+    if text in {"cancel", "/cancel"}:
+        _live_arm_expires_at = None
+        send_telegram("🛑 Live toggle canceled.")
+        return True
+
+    if text and not text.startswith("/"):
+        send_telegram("ℹ️ Live toggle armed: reply ON or OFF, or send cancel.")
+        return True
+
+    return False
 
 def _cmd_apply(trader):
 

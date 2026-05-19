@@ -23,6 +23,24 @@ pip install -r requirements.txt
 3) Create your `~/.env` (copy from `.env.example`) and set values. Keep
 `EXECUTE_LIVE=false` until you have tested thoroughly.
 
+Binance testnet baseline:
+
+```bash
+EXCHANGE_ID=binance
+EXCHANGE_TESTNET=true
+EXCHANGE_MARKET_TYPE=spot
+SYMBOL=XRP/USDT
+BINANCE_TESTNET_API_KEY=your_key_here
+BINANCE_TESTNET_API_SECRET=your_secret_here
+EXECUTE_LIVE=false
+```
+
+When you are ready for live test mode on testnet, set:
+
+```bash
+EXECUTE_LIVE=true
+```
+
 4) Run the reconciliation tool (example)
 
 ```bash
@@ -66,6 +84,13 @@ tmux attach -t gridbot
   `RECONCILE_INTERVAL_SECONDS`.
 - If this is your first deployment on-device, keep `EXECUTE_LIVE=false` until
   these startup stages complete cleanly.
+
+Binance testnet go-live checklist:
+
+- Confirm `EXCHANGE_TESTNET=true` and valid `BINANCE_TESTNET_API_*` credentials.
+- Start once with `EXECUTE_LIVE=false` and verify `/status`, `/metrics`, and logs.
+- Flip `EXECUTE_LIVE=true` only after confirming successful startup + reconciliation.
+- Keep position sizing conservative for first live test cycles.
 
 8) Runtime observability (Telegram + logs)
 
