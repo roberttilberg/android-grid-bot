@@ -7,7 +7,7 @@ clear terminal feedback for Termux sessions.
 
 import argparse
 import os
-import subprocess
+import subprocess  # nosec B404
 import sys
 from pathlib import Path
 
@@ -101,7 +101,8 @@ def main():
     cmd = [sys.executable, str(BOT_FILE)]
     print(f"[start-bot] Launching: {' '.join(cmd)}")
     try:
-        return subprocess.run(cmd, check=False).returncode
+        # Executes a fixed local script path with shell disabled.
+        return subprocess.run(cmd, check=False).returncode  # nosec B603
     except KeyboardInterrupt:
         print("\n[start-bot] Interrupted by user.")
         return 130

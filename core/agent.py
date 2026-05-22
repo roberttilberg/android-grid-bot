@@ -228,8 +228,9 @@ def _handle_llm_decision(response_text, trader, current_price, stats, sr):
                 decision["new_upper"] = max(gl)
             if "new_levels" not in decision:
                 decision["new_levels"] = max(1, len(gl) - 1)
-        except Exception:
-            pass
+        except (ValueError, TypeError) as e:
+            log.error("Invalid explicit new_grid_levels from agent: %s", e)
+            _send_telegram(f"⚠️ Agent returned invalid explicit grid levels: {e}")
     else:
         if not all(k in decision for k in required):
             log.error("Missing required fields in LLM response: %s", decision)

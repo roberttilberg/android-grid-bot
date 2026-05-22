@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import sqlite3
 from datetime import datetime
 
 import core.config as config
@@ -567,11 +568,18 @@ class PaperTrader:
                 )
                 try:
                     orders_db.update_order_by_exchange_id(
-                        exchange_id, m['exchange_order_id'], processed=1
+                        exchange_id, m.get('exchange_order_id'), processed=1
                     )
-                except Exception:
-                    pass
-            except Exception:
+                except sqlite3.Error as e:
+                    log.warning(
+                        "Could not update order %s in DB: %s",
+                        m.get('exchange_order_id'), e,
+                    )
+            except (KeyError, TypeError, ValueError, sqlite3.Error) as e:
+                log.error(
+                    "Error restoring mapping for exchange %s: %s",
+                    exchange_id, e,
+                )
                 continue
         if mapping_restored:
             log.info(

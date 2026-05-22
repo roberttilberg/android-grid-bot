@@ -30,6 +30,7 @@ import threading
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 
+import core.config as config
 import db as orders_db
 from core.agent import apply_pending_changes, run_agent
 from core.config import *
@@ -144,7 +145,7 @@ if not log.handlers:
     log.addHandler(console_handler)
 
 # Global flags
-stop_flag       = threading.Event()
+stop_flag       = config.stop_flag
 pending_changes = None
 pending_lock    = threading.Lock()
 TEST_MODE_ENABLED = False
@@ -274,7 +275,7 @@ def get_simulated_price(seed_price=None):
         TEST_MODE_PRICE = round(base, 4)
 
     # Small random walk to mimic live ticks while remaining bounded.
-    drift = TEST_MODE_PRICE * random.uniform(-0.0015, 0.0015)
+    drift = TEST_MODE_PRICE * random.uniform(-0.0015, 0.0015)  # nosec B311
     TEST_MODE_PRICE = round(min(5.0, max(0.5, TEST_MODE_PRICE + drift)), 4)
     return TEST_MODE_PRICE
 
@@ -461,8 +462,8 @@ def _infer_zone_for_order(trader, side, price):  # noqa: C901
                 if st and abs(st - price) <= (trader.step_size * 0.0001):
                     return zi
             return get_current_zone(price, trader.grid_levels)
-    except Exception:
-        pass
+    except (AttributeError, IndexError, TypeError, ValueError) as exc:
+        log.debug("Could not infer zone from fill side=%s price=%s: %s", side, price, exc)
     return None
 
 
@@ -500,8 +501,8 @@ def _extract_fee_cost(remote, norm):
         fees_list = remote.get("fees")
         if fees_list:
             return sum(float(x.get("cost", 0)) for x in fees_list if isinstance(x, dict))
-    except Exception:
-        pass
+    except (AttributeError, TypeError, ValueError) as exc:
+        log.debug("Could not extract fee cost from remote order: %s", exc)
     return 0.0
 
 
@@ -577,8 +578,8 @@ def _resolve_buy_price_for_sell(trader, zone, price_for_log):
                 st = t.get("sell_target") or 0
                 if st and abs(st - price_for_log) <= (trader.step_size * 0.0005):
                     return t.get("zone"), t.get("price")
-        except Exception:
-            pass
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            log.debug("Could not resolve buy price from open trades for %s: %s", price_for_log, exc)
     return zone, buy_price
 
 
@@ -644,8 +645,8 @@ def _reconcile_log_sell(  # noqa: C901
     try:
         if isinstance(remote, dict):
             order_type = (remote.get("type") or remote.get("orderType") or "").lower()
-    except Exception:
-        pass
+    except AttributeError as exc:
+        log.debug("Could not read order type for reconciled sell: %s", exc)
     sell_fee_rate = TAKER_FEE_PCT if "market" in (order_type or "") else MAKER_FEE_PCT
     sell_fee_est = filled_amt * price * sell_fee_rate
     buy_fee_est = filled_amt * (buy_price or 0) * MAKER_FEE_PCT if buy_price else 0.0
@@ -878,21 +879,41 @@ def _validate_short_execution_capability(exchange):
 
 def _start_bot_threads(trader, exchange, start_offset):
     """Start the Telegram listener and reconciliation worker as asyncio tasks."""
-    asyncio.create_task(telegram_listener(trader, exchange, start_offset))
+    tasks = []
+
+    listener_task = asyncio.create_task(telegram_listener(trader, exchange, start_offset))
+    tasks.append(listener_task)
     log.info("Telegram command listener task created")
 
     try:
         exch_id = getattr(trader.exchange, 'exchange_id', EXCHANGE_ID)
-        asyncio.create_task(reconcile_worker(
+        reconcile_task = asyncio.create_task(reconcile_worker(
             getattr(trader, 'exchange', None),
             SYMBOL,
             exch_id,
             trader,
             RECONCILE_INTERVAL_SECONDS,
         ))
+        tasks.append(reconcile_task)
         log.info("Reconciliation worker task created (interval %ds)", RECONCILE_INTERVAL_SECONDS)
     except Exception as e:
         log.warning("Could not start reconciliation worker: %s", e)
+
+    return tasks
+
+
+async def _shutdown_background_tasks(tasks):
+    if not tasks:
+        return
+
+    for task in tasks:
+        if task and not task.done():
+            task.cancel()
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    for result in results:
+        if isinstance(result, Exception) and not isinstance(result, asyncio.CancelledError):
+            log.warning("Background task exited with error during shutdown: %s", result)
 
 
 def _log_bot_startup_info():
@@ -1036,6 +1057,10 @@ async def _run_bot_runtime_loop(trader, exchange, starting_price):
             )
             if should_stop:
                 break
+        except asyncio.CancelledError:
+            log.info("Runtime loop cancelled; initiating shutdown")
+            stop_flag.set()
+            break
         except KeyboardInterrupt:
             log.info("Bot stopped by user")
             stop_flag.set()
@@ -1070,36 +1095,45 @@ def _send_shutdown_message(trader, exchange):
 
 async def run_bot():
     global AGENT_INTERVAL_HOURS
+    stop_flag.clear()
+    background_tasks = []
+    exchange = None
+    trader = None
 
-    _validate_live_execution_safety()
-    acquire_single_instance_lock()
-    _log_bot_startup_info()
-    init_db()
-
-    exchange = get_exchange()
-    _validate_short_execution_capability(exchange)
-    grid_levels = calculate_grid_levels(GRID_LOWER, GRID_UPPER, GRID_LEVELS)
-    trader = PaperTrader(PAPER_BALANCE, grid_levels)
     try:
-        trader.exchange = exchange
-    except Exception:
-        trader.exchange = None
+        _validate_live_execution_safety()
+        acquire_single_instance_lock()
+        _log_bot_startup_info()
+        init_db()
 
-    log.info("Starting balance: $%s USDT", PAPER_BALANCE)
-    starting_price = get_price(exchange)
-    trend = 'SIDEWAYS' # detect_trend is blocking, maybe keep sideways or await
-    log.info("Starting trend detection: %s", trend)
+        exchange = get_exchange()
+        _validate_short_execution_capability(exchange)
+        grid_levels = calculate_grid_levels(GRID_LOWER, GRID_UPPER, GRID_LEVELS)
+        trader = PaperTrader(PAPER_BALANCE, grid_levels)
+        try:
+            trader.exchange = exchange
+        except Exception:
+            trader.exchange = None
 
-    trader.initialize_zones(starting_price, trend)
-    trader.restore_open_trades_from_db()
-    trader.check_missed_buys(starting_price)
-    _run_initial_reconciliation(trader)
+        log.info("Starting balance: $%s USDT", PAPER_BALANCE)
+        starting_price = get_price(exchange)
+        trend = 'SIDEWAYS' # detect_trend is blocking, maybe keep sideways or await
+        log.info("Starting trend detection: %s", trend)
 
-    start_offset = flush_telegram_queue()
-    _start_bot_threads(trader, exchange, start_offset)
-    await _run_bot_runtime_loop(trader, exchange, starting_price)
-    _send_shutdown_message(trader, exchange)
-    log.info("Bot shutdown complete")
+        trader.initialize_zones(starting_price, trend)
+        trader.restore_open_trades_from_db()
+        trader.check_missed_buys(starting_price)
+        _run_initial_reconciliation(trader)
+
+        start_offset = flush_telegram_queue()
+        background_tasks = _start_bot_threads(trader, exchange, start_offset)
+        await _run_bot_runtime_loop(trader, exchange, starting_price)
+    finally:
+        stop_flag.set()
+        await _shutdown_background_tasks(background_tasks)
+        if trader is not None and exchange is not None:
+            _send_shutdown_message(trader, exchange)
+        log.info("Bot shutdown complete")
 
 if __name__ == "__main__":
     asyncio.run(run_bot())

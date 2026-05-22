@@ -14,6 +14,16 @@ from datetime import datetime
 
 log = logging.getLogger("gridbot.db")
 
+ORDER_UPDATEABLE_FIELDS = {
+    "amount",
+    "filled",
+    "price",
+    "processed",
+    "side",
+    "status",
+    "symbol",
+}
+
 # Keep DB file next to the bot for compatibility with existing scripts
 DB_PATH = os.path.join(os.path.dirname(__file__), "trades.db")
 
@@ -48,8 +58,8 @@ def close_conn():
     if conn:
         try:
             conn.close()
-        except Exception:
-            pass
+        except sqlite3.Error as exc:
+            log.debug("Could not close SQLite connection cleanly: %s", exc)
         _thread_local.conn = None
 
 
@@ -96,9 +106,8 @@ def ensure_orders_table():
         if 'processed' not in cols:
             c.execute("ALTER TABLE orders ADD COLUMN processed INTEGER DEFAULT 0")
             conn.commit()
-    except Exception:
-        # Non-fatal
-        pass
+    except sqlite3.Error as exc:
+        log.warning("Could not ensure orders.processed column exists: %s", exc)
 
     # Create order_trades mapping table to link exchange orders -> trades (idempotency)
     try:
@@ -118,9 +127,8 @@ def ensure_orders_table():
         )
         c.execute(order_trades_create)
         conn.commit()
-    except Exception:
-        # Non-fatal
-        pass
+    except sqlite3.Error as exc:
+        log.warning("Could not ensure order_trades table exists: %s", exc)
 
     # Deduplicate historical rows before adding a uniqueness guard.
     try:
@@ -349,13 +357,19 @@ def update_order_by_exchange_id(
 ):
     if not fields:
         return
+    invalid_fields = sorted(set(fields) - ORDER_UPDATEABLE_FIELDS)
+    if invalid_fields:
+        raise ValueError(
+            f"Unsupported order update fields: {', '.join(invalid_fields)}"
+        )
     conn = conn or get_conn()
     c = conn.cursor()
     cols = ", ".join([f"{k}=?" for k in fields.keys()])
     vals = list(fields.values())
     vals.extend([exchange, str(exchange_order_id)])
+    # Field names are restricted to ORDER_UPDATEABLE_FIELDS above.
     query = (
-        f"UPDATE orders SET {cols}, updated_at = datetime('now') "
+        f"UPDATE orders SET {cols}, updated_at = datetime('now') "  # nosec B608
         "WHERE exchange=? AND exchange_order_id=?"
     )
     c.execute(query, vals)

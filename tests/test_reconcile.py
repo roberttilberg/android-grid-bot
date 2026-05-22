@@ -96,6 +96,20 @@ def test_reconcile_full_fill(app):
     assert float(mapped_sum) == pytest.approx(3.0)
 
 
+def test_update_order_by_exchange_id_rejects_unknown_fields(app):
+    db, _grid = app
+
+    db.insert_order("phemex", "sample-order-2", "XRP/USDT", "BUY", 1.30, 3.0, status="open", processed=0)
+
+    with pytest.raises(ValueError, match="Unsupported order update fields"):
+        db.update_order_by_exchange_id(
+            "phemex",
+            "sample-order-2",
+            status="closed",
+            evil_column="boom",
+        )
+
+
 def test_reconcile_partial_fill(app):
     db, grid = app
 

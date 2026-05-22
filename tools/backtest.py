@@ -19,7 +19,7 @@ def generate_prices(seed_price=1.35, ticks=500, vol=0.0015):
     p = seed_price
     prices = []
     for _i in range(ticks):
-        drift = p * random.uniform(-vol, vol)
+        drift = p * random.uniform(-vol, vol)  # nosec B311
         p = max(0.01, p + drift)
         prices.append(round(p, 6))
     return prices

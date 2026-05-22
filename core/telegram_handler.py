@@ -240,11 +240,12 @@ def _safe_price(exchange):
             ticker = exchange.fetch_ticker(config.SYMBOL)
             if isinstance(ticker, dict) and ticker.get("last") is not None:
                 return float(ticker["last"])
-    except Exception:
-        pass
+    except Exception as e:
+        log.debug("fetch_ticker failed in _safe_price: %s", e)
     try:
         return float(get_price(exchange))
-    except Exception:
+    except Exception as e:
+        log.debug("get_price fallback failed in _safe_price: %s", e)
         return 0.0
 
 
@@ -336,15 +337,30 @@ def _cmd_export():
         filepath = export_performance_csv()
         if filepath:
             with open(filepath, 'rb') as f:
-                requests.post(
-                    f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument",
-                    data={"chat_id": TELEGRAM_CHAT_ID},
-                    files={"document": f},
-                )
-            send_telegram(
-                "📁 <b>Performance data exported</b>\n"
-                "Open in Excel or Google Sheets for deeper analysis."
-            )
+                try:
+                    resp = requests.post(
+                        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument",
+                        data={"chat_id": TELEGRAM_CHAT_ID},
+                        files={"document": f},
+                        timeout=30,
+                    )
+                    if not resp.ok:
+                        log.error(
+                            "sendDocument failed: status=%s body=%s",
+                            resp.status_code, resp.text[:300],
+                        )
+                        _metrics_inc("telegram.errors")
+                        send_telegram("⚠️ Export failed: could not deliver file to Telegram.")
+                    else:
+                        _metrics_inc("telegram.messages.sent")
+                        send_telegram(
+                            "📁 <b>Performance data exported</b>\n"
+                            "Open in Excel or Google Sheets for deeper analysis."
+                        )
+                except requests.exceptions.RequestException as e:
+                    log.error("sendDocument request error: %s", e)
+                    _metrics_inc("telegram.errors")
+                    send_telegram("⚠️ Export failed: could not send file to Telegram.")
         else:
             send_telegram("⚠️ Export failed - check logs")
     except Exception as e:
@@ -575,6 +591,10 @@ def _cmd_reject():
             send_telegram("ℹ️ No pending changes to reject.")
 
 def _cmd_stop():
+    if config.stop_flag.is_set():
+        send_telegram("ℹ️ Stop already in progress.")
+        return
+
     send_telegram(
         "🛑 <b>Stop command received</b>\n"
         "Finishing current cycle then shutting down..."
