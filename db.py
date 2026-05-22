@@ -4,6 +4,7 @@ Thread-safe SQLite helper for WAL mode and simple order table helpers.
 Designed for Termux/local deployments; keeps the same `trades.db` filename
 used by the main bot so it remains compatible with existing code.
 """
+import json
 import logging
 import os
 import sqlite3
@@ -404,22 +405,33 @@ def complete_catchup_trade(zone, exit_price, profit_loss):
 def log_agent_decision(decision, applied=False, rejected=False):
     conn = get_conn()
     c = conn.cursor()
+    sr_json = json.dumps(decision.get("sr_levels") or [])
+    new_grid_val = decision.get("new_grid_levels")
+    if new_grid_val is None:
+        new_grid_json = "[]"
+    else:
+        new_grid_json = json.dumps(new_grid_val)
+
     c.execute("""
         INSERT INTO agent_decisions (
             timestamp, old_lower, old_upper, old_levels, old_order_size,
             old_max_catchup, new_lower, new_upper, new_levels, new_order_size,
-            new_max_catchup, next_interval_hours, reasoning, applied, rejected)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            new_max_catchup, next_interval_hours, reasoning, sr_levels,
+            new_grid_levels, sr_snapshot_ts, applied, rejected)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         datetime.now().isoformat(),
-        decision["old_lower"], decision["old_upper"],
-        decision["old_levels"], decision["old_order_size"],
-        decision["old_max_catchup"],
-        decision["new_lower"], decision["new_upper"],
-        decision["new_levels"], decision["new_order_size"],
-        decision["new_max_catchup"],
-        decision["next_interval_hours"],
-        decision["reasoning"],
+        decision.get("old_lower"), decision.get("old_upper"),
+        decision.get("old_levels"), decision.get("old_order_size"),
+        decision.get("old_max_catchup"),
+        decision.get("new_lower"), decision.get("new_upper"),
+        decision.get("new_levels"), decision.get("new_order_size"),
+        decision.get("new_max_catchup"),
+        decision.get("next_interval_hours"),
+        decision.get("reasoning"),
+        sr_json,
+        new_grid_json,
+        decision.get("sr_snapshot_ts"),
         1 if applied else 0,
         1 if rejected else 0
     ))

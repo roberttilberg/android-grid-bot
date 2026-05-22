@@ -167,6 +167,7 @@ def _dispatch_command(text, trader, exchange):
         "/risk": lambda: _cmd_risk(trader, exchange),
         "/close-shorts": lambda: _cmd_close_shorts(trader, exchange),
         "/agent": lambda: _cmd_agent(trader, exchange),
+        "/sr": lambda: _cmd_sr(trader, exchange),
         "/apply": lambda: _cmd_apply(trader),
         "/reject": _cmd_reject,
     }
@@ -422,6 +423,45 @@ def _cmd_agent(trader, exchange):
         ).start()
     except Exception as e:
         send_telegram(f"⚠️ Could not trigger agent: {e}")
+
+
+def _cmd_sr(trader, exchange):
+    """Detect and preview support/resistance and a proposed grid."""
+    try:
+        from core.sr import compute_grid_from_sr, detect_support_resistance
+        # Use the active adapter if available, otherwise let SR build its own adapter
+        adapter = exchange if exchange is not None else None
+        sr = detect_support_resistance(adapter=adapter, symbol=getattr(config, 'SYMBOL', None), timeframe='1h', lookback=300)
+        if not sr:
+            send_telegram("ℹ️ No clear S/R levels detected for the current symbol/timeframe.")
+            return
+
+        # Build a human-friendly summary
+        lines = ["🔎 <b>Support/Resistance Preview</b>\n"]
+        for s in sr[:12]:
+            lines.append(f"{s['type'].upper()}: ${s['price']} (strength={s['strength']})")
+
+        # Attempt to compute a grid from SR
+        grid = compute_grid_from_sr(sr, target_levels=getattr(config, 'GRID_LEVELS', 20))
+        if grid:
+            lower = grid[0]
+            upper = grid[-1]
+            step = round(grid[1] - grid[0], 6) if len(grid) > 1 else 0
+            lines.append("")
+            lines.append(f"Proposed grid: ${lower} - ${upper} | levels: {len(grid)-1} | step: ${step}")
+            # Show first several levels
+            sample = ", ".join([f"${x}" for x in grid[:8]])
+            lines.append(f"Sample levels: {sample}...")
+        else:
+            lines.append("")
+            lines.append("Could not map S/R into a workable grid automatically.")
+
+        lines.append("")
+        lines.append("Use /agent to request an agent proposal (includes S/R in prompt).")
+        send_telegram("\n".join(lines))
+    except Exception as e:
+        log.error("/sr command failed: %s", e)
+        send_telegram(f"⚠️ SR preview failed: {e}")
 
 def _cmd_testmode(text, trader, exchange):
 

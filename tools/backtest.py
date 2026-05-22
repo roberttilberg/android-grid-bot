@@ -31,8 +31,13 @@ def calculate_grid_levels(lower, upper, levels):
 
 
 def run_backtest(prices, initial_balance=100.0, grid_lower=1.25, grid_upper=1.45,
-                 levels=20, order_size=5.0, maker_fee_pct=0.0001, taker_fee_pct=0.0006):
-    grid = calculate_grid_levels(grid_lower, grid_upper, levels)
+                 levels=20, order_size=5.0, maker_fee_pct=0.0001, taker_fee_pct=0.0006,
+                 explicit_grid=None):
+    # If an explicit grid is provided, use it; otherwise compute evenly spaced grid
+    if explicit_grid is not None and isinstance(explicit_grid, list) and len(explicit_grid) >= 2:
+        grid = explicit_grid
+    else:
+        grid = calculate_grid_levels(grid_lower, grid_upper, levels)
     num_zones = len(grid) - 1
     step_size = grid[1] - grid[0]
 
@@ -108,12 +113,23 @@ def main():
     parser.add_argument('--levels', type=int, default=20)
     parser.add_argument('--order-size', type=float, default=5.0)
     parser.add_argument('--out', type=str, default='backtest_trades.csv')
+    parser.add_argument('--grid-levels', type=str, default=None,
+                        help='Optional comma-separated explicit grid levels, e.g. 1.25,1.27,1.29')
     args = parser.parse_args()
 
     prices = generate_prices(seed_price=args.seed_price, ticks=args.ticks)
+    explicit_grid = None
+    if args.grid_levels:
+        try:
+            explicit_grid = [float(x.strip()) for x in args.grid_levels.split(',') if x.strip()]
+            explicit_grid = sorted(explicit_grid)
+        except Exception:
+            explicit_grid = None
+
     stats, trades = run_backtest(prices, initial_balance=100.0,
                                  grid_lower=args.lower, grid_upper=args.upper,
-                                 levels=args.levels, order_size=args.order_size)
+                                 levels=args.levels, order_size=args.order_size,
+                                 explicit_grid=explicit_grid)
 
     print('Backtest complete')
     for k, v in stats.items():

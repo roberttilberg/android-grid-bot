@@ -321,6 +321,9 @@ def init_db():
             ("new_max_catchup", "INTEGER"),
             ("next_interval_hours", "REAL"),
             ("reasoning", "TEXT"),
+            ("sr_levels", "TEXT"),
+            ("new_grid_levels", "TEXT"),
+            ("sr_snapshot_ts", "TEXT"),
             ("applied", "INTEGER DEFAULT 0"),
             ("rejected", "INTEGER DEFAULT 0")
         ],
