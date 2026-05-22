@@ -186,6 +186,7 @@ def _cmd_help():
         "/metrics — runtime health counters\n"
         "/trades — last 5 trades\n"
         "/grid — grid levels and zone states\n\n"
+        "/sr — support/resistance preview and proposed grid\n\n"
         "/positions — long/short exposure snapshot\n"
         "/risk — short risk limits and margin estimate\n\n"
         "<b>Control:</b>\n"

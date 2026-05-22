@@ -88,6 +88,7 @@ def test_help_sends_message(monkeypatch):
     res = th._dispatch_command("/help", None, None)
     assert res is False
     assert mock_send.called
+    assert "/sr" in mock_send.call_args[0][0]
 
 
 def test_status_calls_trader_status_report(monkeypatch):
