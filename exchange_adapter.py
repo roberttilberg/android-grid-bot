@@ -47,11 +47,10 @@ def retry(max_attempts=5, base_delay=0.5):
 class ExchangeAdapter:
     def __init__(
         self,
-        exchange_id="binance",
+        exchange_id="phemex",
         api_key=None,
         secret=None,
         enable_rate_limit=True,
-        testnet=False,
         options=None,
     ):
         cfg = {"enableRateLimit": enable_rate_limit}
@@ -62,8 +61,6 @@ class ExchangeAdapter:
 
         try:
             self.exchange = getattr(ccxt, exchange_id)(cfg)
-            if testnet and hasattr(self.exchange, "set_sandbox_mode"):
-                self.exchange.set_sandbox_mode(True)
             # load markets lazily but attempt once to validate keys
             try:
                 self.exchange.load_markets()
@@ -76,7 +73,6 @@ class ExchangeAdapter:
         except AttributeError as exc:
             raise ValueError(f"Unknown exchange id: {exchange_id}") from exc
         self.exchange_id = exchange_id
-        self.testnet = bool(testnet)
 
     def supports_shorting(self, short_mode="futures"):
         """Return whether the configured exchange is expected to support shorts."""
@@ -88,15 +84,15 @@ class ExchangeAdapter:
             return True
 
         if mode == "futures":
-            # Binance/Phemex futures require a futures/swap market type.
-            if self.exchange_id in {"binance", "phemex"}:
+            # Phemex futures require a futures/swap market type.
+            if self.exchange_id == "phemex":
                 return default_type in {"future", "futures", "swap"}
             # Conservative default for unknown exchanges.
             return False
 
         if mode == "margin":
             # Margin support is exchange-account specific; allow runtime check path.
-            return self.exchange_id in {"binance", "phemex"}
+            return self.exchange_id == "phemex"
 
         return False
 

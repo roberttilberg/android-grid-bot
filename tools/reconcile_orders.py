@@ -2,7 +2,7 @@
 Lightweight reconciliation utility: sync exchange open orders with local orders table.
 
 Usage:
-  python tools/reconcile_orders.py --exchange binance --symbol XRP/USDT
+    python tools/reconcile_orders.py --symbol XRP/USDT:USDT
 
 This is intentionally conservative: it will insert missing exchange orders into
 the local `orders` table and update statuses for DB orders that changed on the
@@ -45,18 +45,13 @@ def normalize_order(o):
 
 
 def main():
+    exchange_id = "phemex"
     parser = argparse.ArgumentParser()
-    parser.add_argument("--exchange", default="binance", help="Exchange id (ccxt)")
-    parser.add_argument(
-        "--testnet",
-        action="store_true",
-        help="Use exchange sandbox/testnet mode when supported.",
-    )
     parser.add_argument(
         "--market-type",
-        default="spot",
+        default="swap",
         choices=["spot", "future", "futures", "swap"],
-        help="Market type hint for exchanges that require defaultType.",
+        help="Market type hint for Phemex (default: swap).",
     )
     parser.add_argument(
         "--symbol",
@@ -65,27 +60,21 @@ def main():
     )
     args = parser.parse_args()
 
-    api_key, api_secret = get_env_creds(args.exchange)
+    api_key, api_secret = get_env_creds(exchange_id)
     options = None
-    if args.exchange == "phemex":
+    if exchange_id == "phemex":
         options = {"defaultType": "swap"}
-    elif (
-        args.exchange == "binance"
-        and args.market_type in {"future", "futures", "swap"}
-    ):
-        options = {"defaultType": "future"}
 
     adapter = ExchangeAdapter(
-        args.exchange,
+        exchange_id,
         api_key=api_key,
         secret=api_secret,
-        testnet=args.testnet,
         options=options,
     )
 
     db.ensure_orders_table()
 
-    log.info(f"Fetching open orders from {args.exchange} (symbol={args.symbol})")
+    log.info(f"Fetching open orders from {exchange_id} (symbol={args.symbol})")
     try:
         remote_orders = adapter.fetch_open_orders(args.symbol)
     except Exception as e:
@@ -97,18 +86,18 @@ def main():
         o = normalize_order(ro)
         if not o["id"]:
             continue
-        existing = db.find_order_by_exchange_id(args.exchange, o["id"])
+        existing = db.find_order_by_exchange_id(exchange_id, o["id"])
         if existing:
             # update filled/status if changed
             db.update_order_by_exchange_id(
-                args.exchange,
+                exchange_id,
                 o["id"],
                 filled=o["filled"],
                 status=o["status"],
             )
         else:
             db.insert_order(
-                args.exchange,
+                exchange_id,
                 o["id"],
                 o["symbol"],
                 o["side"],
@@ -121,7 +110,7 @@ def main():
     log.info(f"Inserted {inserted} missing open orders from exchange into local DB")
 
     # Now reconcile DB-open orders against exchange
-    db_open = db.get_open_orders_from_db(args.exchange)
+    db_open = db.get_open_orders_from_db(exchange_id)
     updated = 0
     for row in db_open:
         exch_id = row["exchange_order_id"]
@@ -133,7 +122,7 @@ def main():
             if remote:
                 norm = normalize_order(remote)
                 db.update_order_by_exchange_id(
-                    args.exchange,
+                    exchange_id,
                     exch_id,
                     filled=norm["filled"],
                     status=norm["status"],

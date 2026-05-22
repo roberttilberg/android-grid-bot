@@ -4,16 +4,32 @@ from datetime import datetime, timedelta
 
 import core.config as config
 from core.analytics import get_trade_stats
-from core.config import *
+from db import log_agent_decision
 
 log = logging.getLogger('gridbot.agent')
+
+
+def _emit_event(*args, **kwargs):
+    pass  # Placeholder for now
+
+
+def _send_telegram(message):
+    # Lazy import to avoid circular import with core.telegram_handler.
+    from core.telegram_handler import send_telegram
+
+    send_telegram(message)
+
 
 def queue_simulated_agent_change(trader, current_price, approval_seconds=30):
     # global config.pending_changes handled by config
 
     with config.pending_lock:
         if config.pending_changes:
-            return False, "There are already pending agent changes. Use /apply or /reject first."
+            return (
+                False,
+                "There are already pending agent changes. "
+                "Use /apply or /reject first.",
+            )
 
         new_lower = max(0.50, round(trader.grid_lower - 0.01, 4))
         new_upper = min(5.00, round(trader.grid_upper + 0.01, 4))
@@ -39,7 +55,7 @@ def queue_simulated_agent_change(trader, current_price, approval_seconds=30):
         apply_time = datetime.now() + timedelta(seconds=approval_seconds)
         config.pending_changes = {"decision": decision, "apply_at": apply_time}
 
-    send_telegram(
+    _send_telegram(
         f"🧪 <b>Test Mode Simulation Queued</b>\n\n"
         f"Current price: ${current_price:.4f}\n"
         f"Grid: ${decision['new_lower']} - ${decision['new_upper']}\n"
@@ -54,7 +70,7 @@ def queue_simulated_agent_change(trader, current_price, approval_seconds=30):
 def call_groq(prompt):
     try:
         from groq import Groq
-        client   = Groq(api_key=GROQ_API_KEY)
+        client = Groq(api_key=config.GROQ_API_KEY)
         response = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[
@@ -64,7 +80,8 @@ def call_groq(prompt):
                         "You are an expert algorithmic trading agent analyzing "
                         "a grid trading bot's performance. Your job is to analyze "
                         "trade statistics and recommend grid parameter adjustments "
-                        "to improve profitability. Always respond with valid JSON only. "
+                        "to improve profitability. "
+                        "Always respond with valid JSON only. "
                         "No markdown, no explanation outside the JSON."
                     )
                 },
@@ -79,8 +96,6 @@ def call_groq(prompt):
         return None
 
 def run_agent(trader, current_price):
-
-
     if config.TEST_MODE_ENABLED:
         log.info("[TESTMODE] run_agent intercepted; queuing simulated decision.")
         queue_simulated_agent_change(trader, current_price, approval_seconds=30)
@@ -89,11 +104,12 @@ def run_agent(trader, current_price):
     log.info("Agent analysis starting...")
     stats = get_trade_stats()
 
-    if stats["total_sells"] < AGENT_MIN_TRADES:
-        send_telegram(
+    if stats["total_sells"] < config.AGENT_MIN_TRADES:
+        _send_telegram(
             f"🤖 <b>Agent Analysis</b>\n"
             f"Not enough completed trades yet.\n"
-            f"Completed sells: {stats['total_sells']}/{AGENT_MIN_TRADES} needed\n"
+            "Completed sells: "
+            f"{stats['total_sells']}/{config.AGENT_MIN_TRADES} needed\n"
             f"Next analysis in {config.AGENT_INTERVAL_HOURS}h"
         )
         log.info(f"Agent skipped — only {stats['total_sells']} sells so far")
@@ -154,14 +170,23 @@ Respond with ONLY this JSON, no other text:
     response = call_groq(prompt)
 
     if not response:
-        send_telegram("⚠️ Agent analysis failed — LLM unavailable. Will retry next cycle.")
+        _send_telegram(
+            "⚠️ Agent analysis failed - LLM unavailable. Will retry next cycle."
+        )
         return
 
     try:
         decision = json.loads(response)
-        required = ["new_lower", "new_upper", "new_levels", "new_order_size",
-                    "new_max_catchup_zones", "next_interval_hours",
-                    "reasoning", "changes_needed"]
+        required = [
+            "new_lower",
+            "new_upper",
+            "new_levels",
+            "new_order_size",
+            "new_max_catchup_zones",
+            "next_interval_hours",
+            "reasoning",
+            "changes_needed",
+        ]
         if not all(k in decision for k in required):
             raise ValueError("Missing required fields in LLM response")
 
@@ -175,7 +200,7 @@ Respond with ONLY this JSON, no other text:
         config.AGENT_INTERVAL_HOURS = decision["next_interval_hours"]
 
         if not decision["changes_needed"]:
-            send_telegram(
+            _send_telegram(
                 f"🤖 <b>Agent Analysis Complete</b>\n\n"
                 f"<b>Decision: No changes needed</b>\n\n"
                 f"<b>Reasoning:</b>\n{decision['reasoning']}\n\n"
@@ -189,39 +214,47 @@ Respond with ONLY this JSON, no other text:
             log_agent_decision(decision, applied=False, rejected=False)
             return
 
-        apply_time = datetime.now() + timedelta(minutes=AGENT_APPROVAL_MINS)
-        log.info(f"[AGENT] Setting config.pending_changes to apply at {apply_time} with decision: {decision}")
+        apply_time = datetime.now() + timedelta(minutes=config.AGENT_APPROVAL_MINS)
+        log.info(
+            "[AGENT] Setting config.pending_changes to apply at %s with decision: %s",
+            apply_time,
+            decision,
+        )
         with config.pending_lock:
             config.pending_changes = {"decision": decision, "apply_at": apply_time}
 
-        send_telegram(
+        _send_telegram(
             f"🤖 <b>Agent Recommends Changes</b>\n\n"
             f"<b>Reasoning:</b>\n{decision['reasoning']}\n\n"
             f"<b>Proposed Changes:</b>\n"
             f"Grid: ${decision['new_lower']} - ${decision['new_upper']}\n"
             f"  (was ${decision['old_lower']} - ${decision['old_upper']})\n"
-            f"Levels: {decision['new_levels']} (was {decision['old_levels']})\n"  # No $ sign here
-            f"Order Size: ${decision['new_order_size']} (was ${decision['old_order_size']})\n"
-            f"Max Catch-up: {decision['new_max_catchup_zones']} (was {decision['old_max_catchup']})\n"
+            f"Levels: {decision['new_levels']} (was {decision['old_levels']})\n"
+            "Order Size: "
+            f"${decision['new_order_size']} (was ${decision['old_order_size']})\n"
+            "Max Catch-up: "
+            f"{decision['new_max_catchup_zones']} "
+            f"(was {decision['old_max_catchup']})\n"
             f"Next analysis: {decision['next_interval_hours']}h\n\n"
-            f"📊 {stats['total_sells']} trades | {stats['win_rate_pct']}% win rate | ${stats['total_profit']} profit\n\n"
-            f"⏳ <b>Applying in {AGENT_APPROVAL_MINS} minutes</b>\n"
+            f"📊 {stats['total_sells']} trades | {stats['win_rate_pct']}% win rate | "
+            f"${stats['total_profit']} profit\n\n"
+            f"⏳ <b>Applying in {config.AGENT_APPROVAL_MINS} minutes</b>\n"
             f"Send /apply to apply now, or /reject to cancel."
         )
         log.info(f"Agent proposed changes — applying at {apply_time}")
 
     except (json.JSONDecodeError, ValueError, KeyError) as e:
         log.error(f"Agent parse error: {e} | Response: {response}")
-        send_telegram(f"⚠️ Agent error — could not parse LLM response.\n{e}")
+        _send_telegram(f"⚠️ Agent error - could not parse LLM response.\n{e}")
 
 def apply_pending_changes(trader):
-    # global config.pending_changes handled by config, config.GRID_LOWER, config.GRID_UPPER, config.GRID_LEVELS
-
-
-
+    # global config.pending_changes handled by config
     try:
         with config.pending_lock:
-            log.debug(f"[APPLY] Checking config.pending_changes: {config.pending_changes}")
+            log.debug(
+                "[APPLY] Checking config.pending_changes: %s",
+                config.pending_changes,
+            )
             if not config.pending_changes:
                 log.debug("[APPLY] No pending changes to apply.")
                 return
@@ -250,17 +283,29 @@ def apply_pending_changes(trader):
             log.info("[APPLY] Updated global config variables.")
         except Exception as e:
             log.error(f"[APPLY] Error updating global config: {e}")
-            send_telegram(f"⚠️ Error updating config: {e}")
+            _send_telegram(f"⚠️ Error updating config: {e}")
             return
 
         try:
-            new_grid_levels = calculate_grid_levels(config.GRID_LOWER, config.GRID_UPPER, config.GRID_LEVELS)
-            trader.update_grid(new_grid_levels, config.GRID_LOWER, config.GRID_UPPER,
-                               config.GRID_LEVELS, config.ORDER_SIZE, config.MAX_CATCHUP_ZONES)
+            from core.trading import calculate_grid_levels
+
+            new_grid_levels = calculate_grid_levels(
+                config.GRID_LOWER,
+                config.GRID_UPPER,
+                config.GRID_LEVELS,
+            )
+            trader.update_grid(
+                new_grid_levels,
+                config.GRID_LOWER,
+                config.GRID_UPPER,
+                config.GRID_LEVELS,
+                config.ORDER_SIZE,
+                config.MAX_CATCHUP_ZONES,
+            )
             log.info("[APPLY] Called trader.update_grid with new settings.")
         except Exception as e:
             log.error(f"[APPLY] Error updating trader grid: {e}")
-            send_telegram(f"⚠️ Error updating trader grid: {e}")
+            _send_telegram(f"⚠️ Error updating trader grid: {e}")
             return
 
         try:
@@ -282,9 +327,11 @@ def apply_pending_changes(trader):
             log.error(f"[APPLY] Error logging agent decision: {e}")
 
         try:
-            send_telegram(
+            _send_telegram(
                 f"✅ <b>Agent Changes Applied</b>\n\n"
-                f"Grid: ${old_lower}-${old_upper} → ${config.GRID_LOWER}-${config.GRID_UPPER}\n"
+                "Grid: "
+                f"${old_lower}-${old_upper} "
+                f"→ ${config.GRID_LOWER}-${config.GRID_UPPER}\n"
                 f"Levels: {old_levels} → {config.GRID_LEVELS}\n"
                 f"Order Size: ${old_size} → ${config.ORDER_SIZE}\n"
                 f"Max Catch-up: {old_catchup} → {config.MAX_CATCHUP_ZONES}\n\n"
@@ -296,4 +343,4 @@ def apply_pending_changes(trader):
         log.info("Agent changes applied")
     except Exception as e:
         log.error(f"[APPLY] Unexpected error in apply_pending_changes: {e}")
-        send_telegram(f"⚠️ Unexpected error in apply_pending_changes: {e}")
+        _send_telegram(f"⚠️ Unexpected error in apply_pending_changes: {e}")

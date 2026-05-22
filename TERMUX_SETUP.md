@@ -23,27 +23,25 @@ pip install -r requirements.txt
 3) Create your `~/.env` (copy from `.env.example`) and set values. Keep
 `EXECUTE_LIVE=false` until you have tested thoroughly.
 
-Binance testnet baseline:
+Phemex mainnet paper baseline (live data, no live orders):
 
 ```bash
-EXCHANGE_ID=binance
-EXCHANGE_TESTNET=true
-EXCHANGE_MARKET_TYPE=spot
-SYMBOL=XRP/USDT
-BINANCE_TESTNET_API_KEY=your_key_here
-BINANCE_TESTNET_API_SECRET=your_secret_here
+EXCHANGE_ID=phemex
+EXCHANGE_MARKET_TYPE=swap
+SYMBOL=XRP/USDT:USDT
+PHEMEX_API_KEY=your_key_here
+PHEMEX_API_SECRET=your_secret_here
 EXECUTE_LIVE=false
 ```
 
-Sandbox-free API lifecycle testing (no exchange account required):
+Mock-mode API lifecycle testing (no exchange account required):
 
 ```bash
 EXCHANGE_ID=mock
 EXECUTE_LIVE=false
 ```
 
-Mainnet live safety gates (required together when `EXCHANGE_TESTNET=false` and
-`EXECUTE_LIVE=true`):
+Mainnet live safety gates (required together when `EXECUTE_LIVE=true`):
 
 ```bash
 ALLOW_MAINNET_LIVE=true
@@ -61,7 +59,7 @@ MIN_MARGIN_RATIO=1.5
 ALLOW_MAINNET_SHORTS=false
 ```
 
-When you are ready for live test mode on testnet, set:
+When you are ready for live execution on mainnet, set:
 
 ```bash
 EXECUTE_LIVE=true
@@ -71,7 +69,7 @@ EXECUTE_LIVE=true
 
 ```bash
 source .venv/bin/activate
-python tools/reconcile_orders.py --exchange binance --symbol XRP/USDT
+python tools/reconcile_orders.py --symbol XRP/USDT:USDT
 ```
 
 5) Running the bot (existing main script)
@@ -111,14 +109,14 @@ tmux attach -t gridbot
 - If this is your first deployment on-device, keep `EXECUTE_LIVE=false` until
   these startup stages complete cleanly.
 
-Binance testnet go-live checklist:
+Phemex mainnet go-live checklist:
 
-- Confirm `EXCHANGE_TESTNET=true` and valid `BINANCE_TESTNET_API_*` credentials.
+- Confirm valid `PHEMEX_API_*` credentials and `EXCHANGE_ID=phemex`.
 - Start once with `EXECUTE_LIVE=false` and verify `/status`, `/metrics`, and logs.
 - Flip `EXECUTE_LIVE=true` only after confirming successful startup + reconciliation.
 - Keep position sizing conservative for first live test cycles.
 
-Mainnet go-live checklist (if you cannot use a futures sandbox):
+Mainnet go-live checklist:
 
 - Use an isolated/sub-account with only bot funds.
 - Keep withdrawal permission disabled on API keys.

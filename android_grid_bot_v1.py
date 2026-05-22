@@ -806,15 +806,12 @@ def get_exchange():
     options = None
     if EXCHANGE_ID == "phemex":
         options = {"defaultType": "swap"}
-    elif EXCHANGE_ID == "binance" and EXCHANGE_MARKET_TYPE in {"future", "swap", "futures"}:
-        options = {"defaultType": "future"}
 
     return ExchangeAdapter(
         exchange_id=EXCHANGE_ID,
         api_key=API_KEY,
         secret=API_SECRET,
         enable_rate_limit=True,
-        testnet=EXCHANGE_TESTNET,
         options=options,
     )
 
@@ -836,16 +833,14 @@ def _validate_live_execution_safety():
     if not EXECUTE_LIVE:
         return
 
-    if ALLOW_SHORTS and not EXCHANGE_TESTNET and not ALLOW_MAINNET_SHORTS:
+    if ALLOW_SHORTS and not ALLOW_MAINNET_SHORTS:
         raise SystemExit(
             "ERROR: ALLOW_SHORTS=true on mainnet requires ALLOW_MAINNET_SHORTS=true."
         )
 
-    if EXCHANGE_TESTNET:
-        return
     if not ALLOW_MAINNET_LIVE:
         raise SystemExit(
-            "ERROR: EXECUTE_LIVE=true with EXCHANGE_TESTNET=false is blocked. "
+            "ERROR: EXECUTE_LIVE=true is blocked. "
             "Set ALLOW_MAINNET_LIVE=true only after manual review."
         )
     if not LIVE_ACCOUNT_ISOLATED:
@@ -898,7 +893,7 @@ def _start_bot_threads(trader, exchange, start_offset):
 
 
 def _log_bot_startup_info():
-    network_label = "testnet" if EXCHANGE_TESTNET else "mainnet"
+    network_label = "mainnet"
     runtime_label = "LIVE" if EXECUTE_LIVE else "PAPER"
     log.info(
         "STARTUP MODE | exchange=%s | network=%s | runtime=%s | market_type=%s | symbol=%s",
@@ -908,13 +903,11 @@ def _log_bot_startup_info():
         EXCHANGE_MARKET_TYPE,
         SYMBOL,
     )
-    if EXECUTE_LIVE and not EXCHANGE_TESTNET:
+    if EXECUTE_LIVE:
         log.warning(
             "LIVE MAINNET EXECUTION ENABLED | account_isolated=%s",
             LIVE_ACCOUNT_ISOLATED,
         )
-    elif EXECUTE_LIVE and EXCHANGE_TESTNET:
-        log.warning("LIVE TESTNET EXECUTION ENABLED")
 
     if ALLOW_SHORTS:
         log.warning(

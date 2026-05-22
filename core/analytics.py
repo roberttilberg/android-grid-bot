@@ -3,7 +3,6 @@ import logging
 import pandas as pd
 
 import db as orders_db
-from core.config import *
 
 log = logging.getLogger("gridbot.analytics")
 
@@ -51,7 +50,8 @@ def get_advanced_stats():
     # Average hold time by zone
     c.execute("""
         SELECT buy.grid_level,
-               AVG(julianday(sell.timestamp) - julianday(buy.timestamp)) * 24 * 60 as avg_mins
+               AVG(julianday(sell.timestamp) - julianday(buy.timestamp))
+               * 24 * 60 as avg_mins
         FROM trades buy
         JOIN trades sell ON buy.grid_level = sell.grid_level
             AND buy.side = 'BUY' AND sell.side = 'SELL'
@@ -65,13 +65,19 @@ def get_advanced_stats():
     c.execute("""
         SELECT
             SUM(CASE WHEN profit_loss > 0 THEN profit_loss ELSE 0 END) as gross_profit,
-            SUM(CASE WHEN profit_loss < 0 THEN ABS(profit_loss) ELSE 0 END) as gross_loss
+            SUM(
+                CASE WHEN profit_loss < 0 THEN ABS(profit_loss) ELSE 0 END
+            ) as gross_loss
         FROM trades WHERE side='SELL'
     """)
     pf_row = c.fetchone()
     gross_profit = pf_row[0] or 0
     gross_loss = pf_row[1] or 0
-    profit_factor = round(gross_profit / gross_loss, 2) if gross_loss > 0 else float('inf')
+    profit_factor = (
+        round(gross_profit / gross_loss, 2)
+        if gross_loss > 0
+        else float('inf')
+    )
 
     # Daily breakdown (last 7 days)
     c.execute("""

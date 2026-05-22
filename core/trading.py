@@ -186,22 +186,17 @@ def _reconcile_build_adapter(adapter, exchange_id):
         from core.config import (
             API_KEY,
             API_SECRET,
-            EXCHANGE_MARKET_TYPE,
-            EXCHANGE_TESTNET,
         )
         from exchange_adapter import ExchangeAdapter
 
         options = None
         if exchange_id == "phemex":
             options = {"defaultType": "swap"}
-        elif exchange_id == "binance" and EXCHANGE_MARKET_TYPE in {"future", "swap", "futures"}:
-            options = {"defaultType": "future"}
 
         return ExchangeAdapter(
             exchange_id,
             API_KEY,
             API_SECRET,
-            testnet=EXCHANGE_TESTNET,
             options=options,
         )
     except Exception as e:

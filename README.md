@@ -29,7 +29,7 @@ Use [.env.example](.env.example) as the source of truth for startup flags.
 
 - Keep `EXECUTE_LIVE=false` by default.
 - Keep `ALLOW_SHORTS=false` until paper-mode validation is complete.
-- Use `EXCHANGE_TESTNET=true` for first exchange-connected runs.
+- Use `EXCHANGE_ID=phemex` and `EXCHANGE_MARKET_TYPE=swap` for exchange-connected runs.
 - Never enable mainnet execution without both `ALLOW_MAINNET_LIVE=true` and `LIVE_ACCOUNT_ISOLATED=true`.
 - Never enable mainnet shorts without `ALLOW_MAINNET_SHORTS=true`.
 

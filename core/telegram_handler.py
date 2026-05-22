@@ -458,8 +458,7 @@ def _cmd_live(text):
         send_telegram(
             "⚙️ <b>Execution Mode</b>\n"
             f"EXECUTE_LIVE: {'ON' if config.EXECUTE_LIVE else 'OFF'}\n"
-            f"Exchange: {config.EXCHANGE_ID}\n"
-            f"Testnet: {'ON' if config.EXCHANGE_TESTNET else 'OFF'}"
+            f"Exchange: {config.EXCHANGE_ID}"
         )
         return
 
@@ -490,14 +489,6 @@ def _handle_live_arm_reply(text):
 
     if text in {"on", "off"}:
         desired_live = text == "on"
-        if desired_live and not config.EXCHANGE_TESTNET:
-            send_telegram(
-                "⚠️ Refusing ON because EXCHANGE_TESTNET is OFF.\n"
-                "Set EXCHANGE_TESTNET=true before enabling live execution."
-            )
-            _live_arm_expires_at = None
-            return True
-
         config.EXECUTE_LIVE = desired_live
         _live_arm_expires_at = None
         mode_label = "ON" if config.EXECUTE_LIVE else "OFF"

@@ -1,7 +1,7 @@
 """Mock exchange adapter for deterministic API lifecycle testing.
 
 Implements the same method surface used by the bot's exchange layer so
-trading/reconciliation paths can be validated without testnet access.
+trading/reconciliation paths can be validated without a live exchange account.
 """
 
 from __future__ import annotations

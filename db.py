@@ -1,5 +1,3 @@
-from datetime import datetime
-
 """db.py
 Thread-safe SQLite helper for WAL mode and simple order table helpers.
 
@@ -11,6 +9,7 @@ import os
 import sqlite3
 import threading
 from contextlib import contextmanager
+from datetime import datetime
 
 log = logging.getLogger("gridbot.db")
 

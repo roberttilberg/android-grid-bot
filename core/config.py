@@ -59,11 +59,8 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 GROQ_API_KEY     = os.getenv("GROQ_API_KEY", "")
 
 EXECUTE_LIVE = os.getenv("EXECUTE_LIVE", "false").lower() in ("1", "true", "yes")
-EXCHANGE_ID = os.getenv("EXCHANGE_ID", "binance").strip().lower()
-EXCHANGE_TESTNET = os.getenv("EXCHANGE_TESTNET", "false").lower() in (
-    "1", "true", "yes"
-)
-EXCHANGE_MARKET_TYPE = os.getenv("EXCHANGE_MARKET_TYPE", "spot").strip().lower()
+EXCHANGE_ID = os.getenv("EXCHANGE_ID", "phemex").strip().lower()
+EXCHANGE_MARKET_TYPE = os.getenv("EXCHANGE_MARKET_TYPE", "swap").strip().lower()
 ALLOW_MAINNET_LIVE = os.getenv("ALLOW_MAINNET_LIVE", "false").lower() in (
     "1", "true", "yes"
 )
@@ -83,19 +80,15 @@ ALLOW_MAINNET_SHORTS = os.getenv("ALLOW_MAINNET_SHORTS", "false").lower() in (
 
 
 def _read_exchange_credential(kind):
-    """Resolve API credentials with exchange-specific and testnet-aware priority."""
+    """Resolve API credentials with exchange-specific and generic fallback names."""
     ex = EXCHANGE_ID.upper()
     if kind == "key":
         generic_name = "API_KEY"
         direct_name = f"{ex}_API_KEY"
-        testnet_name = f"{ex}_TESTNET_API_KEY"
     else:
         generic_name = "API_SECRET"
         direct_name = f"{ex}_API_SECRET"
-        testnet_name = f"{ex}_TESTNET_API_SECRET"
 
-    if EXCHANGE_TESTNET and os.getenv(testnet_name):
-        return os.getenv(testnet_name, "")
     if os.getenv(direct_name):
         return os.getenv(direct_name, "")
     return os.getenv(generic_name, "")
@@ -106,7 +99,7 @@ API_SECRET = _read_exchange_credential("secret")
 
 SYMBOL = os.getenv(
     "SYMBOL",
-    "XRP/USDT:USDT" if EXCHANGE_ID == "phemex" else "XRP/USDT",
+    "XRP/USDT:USDT",
 )
 PAPER_BALANCE = 100.0
 CHECK_INTERVAL = 30
